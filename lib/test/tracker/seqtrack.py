@@ -7,6 +7,7 @@ from lib.models.seqtrack import build_seqtrack
 from lib.test.tracker.seqtrack_utils import Preprocessor
 from lib.utils.box_ops import clip_box
 import numpy as np
+from lib.test.tracker.motion_prior import MotionPrior
 
 
 class SEQTRACK(BaseTracker):
@@ -30,6 +31,22 @@ class SEQTRACK(BaseTracker):
         self.state = None
         self.debug = params.debug
         self.frame_id = 0
+
+        # ---- Motion Prior ----
+        # Read motion prior settings from cfg (with safe defaults)
+        use_motion_prior = getattr(self.cfg.TEST, 'MOTION_PRIOR_USE', False)
+        lambda_motion = getattr(self.cfg.TEST, 'MOTION_PRIOR_LAMBDA', 0.3)
+        sigma_motion = getattr(self.cfg.TEST, 'MOTION_PRIOR_SIGMA', 20.0)
+        self.motion_prior = MotionPrior(
+            use_motion_prior=use_motion_prior,
+            lambda_motion=lambda_motion,
+            sigma=sigma_motion,
+        )
+        if use_motion_prior:
+            print(f"[MotionPrior] Enabled: lambda={lambda_motion}, sigma={sigma_motion}")
+        else:
+            print("[MotionPrior] Disabled (baseline mode)")
+        # -----------------------
 
         # online update settings
         DATASET_NAME = dataset_name.upper()
@@ -62,6 +79,14 @@ class SEQTRACK(BaseTracker):
         self.state = info['init_bbox']
         self.frame_id = 0
 
+        # Initialize motion prior with the first-frame center
+        if self.motion_prior.use_motion_prior:
+            self.motion_prior.reset()
+            init_cx = self.state[0] + 0.5 * self.state[2]
+            init_cy = self.state[1] + 0.5 * self.state[3]
+            self.motion_prior.update(init_cx, init_cy)
+            self._motion_info = {}
+
     def track(self, image, info: dict = None):
         H, W, _ = image.shape
         self.frame_id += 1
@@ -92,11 +117,56 @@ class SEQTRACK(BaseTracker):
         pred_boxes = pred_boxes / (self.bins-1)
         pred_box = (pred_boxes.mean(dim=0) * self.params.search_size / resize_factor).tolist()  # (cx, cy, w, h) [0,1]
 
+        # ===== Motion Prior: soft center correction =====
+        # pred_box is in original-image crop coordinates:
+        #   cx = half_side maps to previous center in original image
+        #   half_side = 0.5 * search_size / resize_factor
+        self._motion_info = {
+            'predicted_center': None,
+            'prior_score': 0.0,
+            'final_score': 0.0,
+            'use_motion_prior': False,
+        }
+        if self.motion_prior.use_motion_prior:
+            # 1. Compute the model-predicted center in original image coords
+            cx_prev_img = self.state[0] + 0.5 * self.state[2]
+            cy_prev_img = self.state[1] + 0.5 * self.state[3]
+            half_side = 0.5 * self.params.search_size / resize_factor
+            pred_cx_img = pred_box[0] + (cx_prev_img - half_side)
+            pred_cy_img = pred_box[1] + (cy_prev_img - half_side)
+
+            # 2. Predict next center from motion model
+            c_hat = self.motion_prior.predict()
+            # Alternative: c_hat = self.motion_prior.predict_with_acceleration()
+
+            # 3. Apply Gaussian-weighted soft blend (in original image coords)
+            corrected_cx, corrected_cy, prior_weight, motion_info = \
+                self.motion_prior.apply(pred_cx_img, pred_cy_img, c_hat)
+            self._motion_info = motion_info
+
+            if prior_weight > 0.0:
+                # Convert corrected center back to crop coordinates
+                pred_box[0] = corrected_cx - (cx_prev_img - half_side)
+                pred_box[1] = corrected_cy - (cy_prev_img - half_side)
+
+            # 4. Update motion history (after this frame, for next prediction)
+            # Note: we feed the ORIGINAL model prediction (not corrected)
+            # to avoid compounding errors from the prior itself.
+            # If you prefer using the corrected center, change here.
+            self.motion_prior.update(pred_cx_img, pred_cy_img)
+        # ====================================================
+
         # get the final box result
         self.state = clip_box(self.map_box_back(pred_box, resize_factor), H, W, margin=1)
 
         # update the template
         conf_score = out_dict['confidence'].sum().item() * 10  # the confidence score
+
+        # ---- Append motion prior info to conf_score for logging ----
+        if self.motion_prior.use_motion_prior:
+            self._motion_info['final_score'] = conf_score + self._motion_info.get('prior_score', 0.0)
+        # ------------------------------------------------------------
+
         if self.num_template > 1:
             if (self.frame_id % self.update_intervals == 0) and (conf_score > self.update_threshold):
                 z_patch_arr, _ = sample_target(image, self.state, self.params.template_factor,
@@ -115,7 +185,8 @@ class SEQTRACK(BaseTracker):
             cv2.waitKey(1)
 
         return {"target_bbox": self.state,
-                "best_score": conf_score}
+                "best_score": conf_score,
+                "motion_prior": self._motion_info}
 
     def map_box_back(self, pred_box: list, resize_factor: float):
         cx_prev, cy_prev = self.state[0] + 0.5 * self.state[2], self.state[1] + 0.5 * self.state[3]

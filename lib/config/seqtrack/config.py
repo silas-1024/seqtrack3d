@@ -110,6 +110,12 @@ cfg.TEST.UPDATE_THRESHOLD.SV248S_TEST = 0.475
 cfg.TEST.UPDATE_THRESHOLD.SATSOT = 0.475
 cfg.TEST.UPDATE_THRESHOLD.VISO = 0.475
 
+# MOTION PRIOR (inference-only soft center correction)
+# Set MOTION_PRIOR_USE=True to enable constant-velocity center prediction.
+# When disabled (default), the tracker behaves exactly like the baseline.
+cfg.TEST.MOTION_PRIOR_USE = TRUE
+cfg.TEST.MOTION_PRIOR_LAMBDA = 0.3    # max blending weight [0, 1]
+cfg.TEST.MOTION_PRIOR_SIGMA = 20.0    # Gaussian bandwidth in original-image pixels
 
 
 
