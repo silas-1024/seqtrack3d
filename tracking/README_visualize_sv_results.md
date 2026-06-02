@@ -8,7 +8,7 @@
 
 ## 快速使用
 
-在 `seqtrack_3d` 根目录执行：
+在 `seqtrack3d` 根目录执行：
 
 ```bash
 source /home/silas/miniconda3/etc/profile.d/conda.sh

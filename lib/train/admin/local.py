@@ -1,8 +1,8 @@
 class EnvironmentSettings:
     def __init__(self):
-        self.workspace_dir = '/media/lisuran/seqtrack_3d'    # Base directory for saving network checkpoints.
-        self.tensorboard_dir = '/media/lisuran/seqtrack_3d/tensorboard'    # Directory for tensorboard files.
-        self.pretrained_networks = '/media/lisuran/seqtrack_3d/pretrained_networks'
+        self.workspace_dir = '/media/lisuran/seqtrack3d'    # Base directory for saving network checkpoints.
+        self.tensorboard_dir = '/media/lisuran/seqtrack3d/tensorboard'    # Directory for tensorboard files.
+        self.pretrained_networks = '/media/lisuran/seqtrack3d/pretrained_networks'
         self.lasot_dir = '/media/pc-4090/9bd4d9e0-148f-4dd1-a9c6-1f4c9dff8e4e/datasets/lasot'
         self.got10k_dir = '/media/pc-4090/9bd4d9e0-148f-4dd1-a9c6-1f4c9dff8e4e/datasets/got10k/train'
         self.lasot_lmdb_dir = '/media/pc-4090/9bd4d9e0-148f-4dd1-a9c6-1f4c9dff8e4e/datasets/lasot_lmdb'

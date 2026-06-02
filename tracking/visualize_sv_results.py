@@ -17,13 +17,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--results_dir",
         type=Path,
-        default=Path("/home/silas/tracking/algorithm/seqtrack_3d/output/test/tracking_results/seqtrack/seqtrack_b384_3d"),
+        default=Path("/home/silas/tracking/algorithm/seqtrack3d/output/test/tracking_results/seqtrack/seqtrack_b384_3d"),
         help="Path to tracker result txt directory.",
     )
     parser.add_argument(
         "--output_dir",
         type=Path,
-        default=Path("/home/silas/tracking/algorithm/seqtrack_3d/output/test/visualizations/seqtrack_b384_3d"),
+        default=Path("/home/silas/tracking/algorithm/seqtrack3d/output/test/visualizations/seqtrack_b384_3d"),
         help="Directory to store rendered videos.",
     )
     parser.add_argument(

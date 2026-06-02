@@ -12,12 +12,12 @@ def main():
     parser.add_argument(
         "--mae_path",
         type=str,
-        default="/home/silas/tracking/algorithm/seqtrack_3d/pretrained_models/mae_pretrain_vit_base.pth",
+        default="/home/silas/tracking/algorithm/seqtrack3d/pretrained_models/mae_pretrain_vit_base.pth",
     )
     parser.add_argument(
         "--output_ckpt",
         type=str,
-        default="/home/silas/tracking/algorithm/seqtrack_3d/output/checkpoints/train/seqtrack/seqtrack_b384_3d/SEQTRACK_ep0060.pth.tar",
+        default="/home/silas/tracking/algorithm/seqtrack3d/output/checkpoints/train/seqtrack/seqtrack_b384_3d/SEQTRACK_ep0060.pth.tar",
     )
     args = parser.parse_args()
 

@@ -75,11 +75,11 @@ class BaseTrainer:
                 if load_previous_ckpt:
                     directory = '{}/{}'.format(self._checkpoint_dir, self.settings.project_path_prv)
                     # if config_name == "seqtrack_b384_3d":
-                    #     directory = '/home/wjh/seqtrack_3d/output/checkpoints/train/seqtrack_b384'
+                    #     directory = '/home/wjh/seqtrack3d/output/checkpoints/train/seqtrack_b384'
                     # elif config_name == "seqtrack_b256_3d":
                     #     directory = '/home/wjh/seqtrack_llm/output/checkpoints/seqtrack_b256'
                     # elif config_name == "seqtrack_l256_3d":
-                    #     directory = '/home/wjh/seqtrack_3d/output/checkpoints/train/seqtrack_l256'
+                    #     directory = '/home/wjh/seqtrack3d/output/checkpoints/train/seqtrack_l256'
                         
                     self.load_state_dict(directory)
                 if distill:
