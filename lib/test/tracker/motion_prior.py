@@ -1,58 +1,72 @@
 """
-Motion Prior Module for inference-time soft center correction.
+Motion Prior Module for inference-time search-crop center prediction.
 
-Implements a constant-velocity motion model that predicts the target center
-in the next frame and applies a Gaussian-weighted soft bias to the model's
-predicted center.
+Predicts the next-frame target center from historical observed centers
+using a constant-velocity (or constant-acceleration) motion model.
+The predicted center is used to shift the search crop region BEFORE
+feature extraction — no post-hoc box correction is applied.
 
 Usage:
-    motion_prior = MotionPrior(use_motion_prior=True, lambda_motion=0.3, sigma=20.0)
-    motion_prior.update(cx, cy)   # feed history
-    c_hat = motion_prior.predict()  # get prediction (None if insufficient history)
-    corrected_center, prior_score, info = motion_prior.apply(center, c_hat)
+    mp = MotionPrior(use=True, model='constant_velocity', clip=100, warmup_frames=2)
+    mp.update(cx, cy)          # feed observed center after each frame
+    c_hat = mp.predict()       # get predicted next center (None if disabled)
+    search_cx, search_cy, weight, info = mp.get_search_center(fallback_cx, fallback_cy)
 """
 
-import numpy as np
+import math
 
 
 class MotionPrior:
     """
-    Constant-velocity motion prior for soft center correction.
+    Motion-based search-crop center predictor for visual tracking.
 
-    Tracks historical target centers, predicts the next center using
-    velocity estimation, and applies a Gaussian-weighted blend between
-    the model-predicted center and the motion-predicted center.
+    Maintains a history of observed target centers (from model outputs,
+    NOT motion-corrected) and predicts the next-frame center.
+
+    The predicted center shifts the search crop BEFORE the model runs,
+    so the model's feature extraction and box prediction remain unchanged.
 
     Attributes:
-        use_motion_prior (bool): Master switch. When False, all methods
-            return identity / no-op results.
-        lambda_motion (float): Maximum blending weight (0 = no effect,
-            1 = fully trust motion prior when distance=0).
-        sigma (float): Spatial bandwidth of the Gaussian decay (in
-            original image pixels). Larger sigma = wider influence.
-        max_history (int): Maximum number of historical centers to store.
+        use (bool): Master switch. When False, always returns fallback.
+        model (str): 'constant_velocity' or 'constant_acceleration'.
+        clip (float): Maximum allowed center shift (in original-image pixels).
+            Predicted offsets beyond this are clipped to this radius.
+        warmup_frames (int): Number of frames to skip motion prior after init.
+            During warmup, uses fallback center.
+        max_history (int): Max number of historical centers to store.
     """
 
     def __init__(self,
-                 use_motion_prior: bool = True,
-                 lambda_motion: float = 0.3,
-                 sigma: float = 20.0,
+                 use: bool = True,
+                 model: str = 'constant_velocity',
+                 clip: float = 100.0,
+                 warmup_frames: int = 2,
                  max_history: int = 10):
-        self.use_motion_prior = use_motion_prior
-        self.lambda_motion = lambda_motion
-        self.sigma = sigma
+        self.use = use
+        self.model = model
+        self.clip = clip
+        self.warmup_frames = warmup_frames
         self.max_history = max_history
-        self.history_centers = []  # list of (cx, cy) in original image coords
+
+        # History stores observed centers (original image coords) as [(cx,cy), ...]
+        self.history_centers = []
         self.frame_count = 0
+
+    # ------------------------------------------------------------------
+    #  Public API
+    # ------------------------------------------------------------------
 
     def update(self, cx: float, cy: float):
         """
-        Record the center of the current frame (after tracking is done).
+        Record an OBSERVED target center after the tracker finishes a frame.
+
+        IMPORTANT: Always feed the model's raw output center, not a
+        motion-corrected one. This avoids compounding prediction error.
 
         Args:
             cx, cy: Target center in original image coordinates.
         """
-        if not self.use_motion_prior:
+        if not self.use:
             return
         self.history_centers.append((cx, cy))
         if len(self.history_centers) > self.max_history:
@@ -61,126 +75,123 @@ class MotionPrior:
 
     def predict(self):
         """
-        Predict the next-frame center using a constant-velocity model.
-
-        Velocity is estimated from the last two known centers:
-            v_t = c_t - c_{t-1}
-            c_hat = c_t + v_t
+        Predict the next-frame target center using the configured motion model.
 
         Returns:
-            (cx_hat, cy_hat) in original image coordinates, or None if
-            fewer than 2 historical centers are available (falls back to
-            no prior).
+            (cx_hat, cy_hat) in original image coords, or None if:
+            - motion prior is disabled, or
+            - insufficient history (fewer than 2 frames for CV, 3 for CA).
         """
-        if not self.use_motion_prior:
+        if not self.use:
             return None
+
+        if self.frame_count < self.warmup_frames:
+            return None
+
+        if self.model == 'constant_velocity':
+            return self._predict_cv()
+        elif self.model == 'constant_acceleration':
+            return self._predict_ca()
+        else:
+            raise ValueError(f"Unknown motion model: {self.model}")
+
+    def get_search_center(self,
+                          fallback_cx: float,
+                          fallback_cy: float,
+                          conf_score: float = None,
+                          img_W: int = None,
+                          img_H: int = None):
+        """
+        Get the center to use for search crop extraction.
+
+        When motion prior is active and a valid prediction exists, returns
+        the predicted center (clipped). Otherwise returns the fallback.
+
+        Args:
+            fallback_cx, fallback_cy: Default center (usually previous frame's
+                observed center) in original image coords.
+            conf_score: Optional tracker confidence, for future soft fallback.
+            img_W, img_H: Optional image dimensions for boundary clipping.
+
+        Returns:
+            tuple: (search_cx, search_cy, motion_weight, info_dict)
+                - search_cx, search_cy: center to use for search crop.
+                - motion_weight: 1.0 if motion prior is active, 0.0 otherwise.
+                - info_dict: diagnostic fields for logging/ablation.
+        """
+        info = {
+            'last_center': (fallback_cx, fallback_cy),
+            'predicted_center': None,
+            'search_crop_center': (fallback_cx, fallback_cy),
+            'motion_weight': 0.0,
+            'motion_enabled': self.use and self.frame_count >= self.warmup_frames,
+        }
+
+        c_hat = self.predict()
+        if c_hat is None:
+            info['search_crop_center'] = (fallback_cx, fallback_cy)
+            return fallback_cx, fallback_cy, 0.0, info
+
+        # Compute raw offset from fallback
+        dx = c_hat[0] - fallback_cx
+        dy = c_hat[1] - fallback_cy
+        dist = math.sqrt(dx * dx + dy * dy)
+
+        # Clip excessive offset (circular clip to max radius)
+        if dist > self.clip and self.clip > 0:
+            scale = self.clip / dist
+            dx *= scale
+            dy *= scale
+
+        search_cx = fallback_cx + dx
+        search_cy = fallback_cy + dy
+
+        # Clamp to image boundaries if provided
+        if img_W is not None and img_H is not None:
+            search_cx = max(0.0, min(search_cx, float(img_W - 1)))
+            search_cy = max(0.0, min(search_cy, float(img_H - 1)))
+
+        info['predicted_center'] = (c_hat[0], c_hat[1])
+        info['search_crop_center'] = (search_cx, search_cy)
+        info['motion_weight'] = 1.0
+
+        return search_cx, search_cy, 1.0, info
+
+    # ------------------------------------------------------------------
+    #  Internal prediction methods
+    # ------------------------------------------------------------------
+
+    def _predict_cv(self):
+        """Constant-velocity: c_hat = c_t + (c_t - c_{t-1})."""
         if len(self.history_centers) < 2:
             return None
+        cx_t, cy_t = self.history_centers[-1]
+        cx_t1, cy_t1 = self.history_centers[-2]
+        return (2 * cx_t - cx_t1, 2 * cy_t - cy_t1)
 
-        cx_prev, cy_prev = self.history_centers[-1]
-        cx_prev2, cy_prev2 = self.history_centers[-2]
-
-        vx = cx_prev - cx_prev2
-        vy = cy_prev - cy_prev2
-
-        cx_hat = cx_prev + vx
-        cy_hat = cy_prev + vy
-
-        return (cx_hat, cy_hat)
-
-    def predict_with_acceleration(self):
-        """
-        (Optional) Predict using constant-acceleration model.
-
-        Uses the last three centers to estimate acceleration:
-            a_t = v_t - v_{t-1}
-            c_hat = c_t + v_t + 0.5 * a_t
-
-        Returns:
-            (cx_hat, cy_hat) or None.
-        """
-        if not self.use_motion_prior:
-            return None
+    def _predict_ca(self):
+        """Constant-acceleration: c_hat = c_t + v_t + 0.5 * a_t."""
         if len(self.history_centers) < 3:
-            return self.predict()  # fall back to constant velocity
-
+            return self._predict_cv()
         cx_t, cy_t = self.history_centers[-1]
         cx_t1, cy_t1 = self.history_centers[-2]
         cx_t2, cy_t2 = self.history_centers[-3]
-
         vx = cx_t - cx_t1
         vy = cy_t - cy_t1
-        vx_prev = cx_t1 - cx_t2
-        vy_prev = cy_t1 - cy_t2
+        ax = vx - (cx_t1 - cx_t2)
+        ay = vy - (cy_t1 - cy_t2)
+        return (cx_t + vx + 0.5 * ax, cy_t + vy + 0.5 * ay)
 
-        ax = vx - vx_prev
-        ay = vy - vy_prev
-
-        cx_hat = cx_t + vx + 0.5 * ax
-        cy_hat = cy_t + vy + 0.5 * ay
-
-        return (cx_hat, cy_hat)
-
-    def apply(self, pred_cx: float, pred_cy: float, c_hat):
-        """
-        Apply motion-prior soft correction to the predicted center.
-
-        Computes:
-            weight = lambda * exp(-dist^2 / (2 * sigma^2))
-            corrected = (1 - weight) * pred + weight * c_hat
-
-        Args:
-            pred_cx, pred_cy: Model-predicted center (in the same coordinate
-                space as c_hat; expected: original image pixels).
-            c_hat: Motion-predicted center (cx, cy) or None.
-
-        Returns:
-            tuple: (corrected_cx, corrected_cy, prior_weight, info_dict)
-                - corrected_cx, corrected_cy: blended center.
-                - prior_weight: the actual weight applied (0 if no prior).
-                - info_dict: diagnostic information for logging/ablation.
-        """
-        # Build base info dict (used even when prior is off)
-        info = {
-            'predicted_center': c_hat,
-            'prior_score': 0.0,
-            'final_score': 0.0,
-            'use_motion_prior': self.use_motion_prior,
-            'distance': 0.0,
-            'weight': 0.0,
-        }
-
-        if (not self.use_motion_prior) or (c_hat is None):
-            info['predicted_center'] = None
-            return pred_cx, pred_cy, 0.0, info
-
-        # Euclidean distance between model prediction and motion prior
-        dx = pred_cx - c_hat[0]
-        dy = pred_cy - c_hat[1]
-        dist = np.sqrt(dx * dx + dy * dy)
-
-        # Gaussian decay: closer → higher weight
-        weight = self.lambda_motion * np.exp(-dist**2 / (2.0 * self.sigma**2))
-        weight = float(np.clip(weight, 0.0, self.lambda_motion))
-
-        # Soft blend
-        corrected_cx = (1.0 - weight) * pred_cx + weight * c_hat[0]
-        corrected_cy = (1.0 - weight) * pred_cy + weight * c_hat[1]
-
-        info['distance'] = float(dist)
-        info['weight'] = weight
-        info['prior_score'] = weight
-        info['predicted_center'] = c_hat
-        info['use_motion_prior'] = True
-
-        return corrected_cx, corrected_cy, weight, info
+    # ------------------------------------------------------------------
+    #  Utility
+    # ------------------------------------------------------------------
 
     def reset(self):
-        """Clear history (e.g., for a new sequence)."""
+        """Clear history (call at the start of each sequence)."""
         self.history_centers = []
         self.frame_count = 0
 
     def __repr__(self):
-        return (f"MotionPrior(use={self.use_motion_prior}, "
-                f"lambda={self.lambda_motion}, sigma={self.sigma}, "
+        return (f"MotionPrior(use={self.use}, model={self.model}, "
+                f"clip={self.clip}, warmup={self.warmup_frames}, "
                 f"history={len(self.history_centers)})")
