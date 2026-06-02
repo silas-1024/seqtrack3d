@@ -110,14 +110,17 @@ cfg.TEST.UPDATE_THRESHOLD.SV248S_TEST = 0.475
 cfg.TEST.UPDATE_THRESHOLD.SATSOT = 0.475
 cfg.TEST.UPDATE_THRESHOLD.VISO = 0.475
 
-# MOTION SEARCH CENTER (inference-only search-crop center prediction)
+# MOTION SEARCH CENTER (inference-only search-crop center SOFT guidance)
 # When enabled, the motion model predicts the next-frame target center and
-# shifts the search crop BEFORE feature extraction. No post-hoc box correction.
+# SOFTLY blends it with the fallback center to gently guide the search crop.
+# This avoids the degradation caused by hard replacement.
 # Default off (baseline behavior unchanged).
 cfg.TEST.USE_MOTION_SEARCH_CENTER = False
 cfg.TEST.MOTION_MODEL = "constant_velocity"  # "constant_velocity" or "constant_acceleration"
+cfg.TEST.MOTION_ALPHA = 0.1                   # base blend weight for motion prior (small!)
 cfg.TEST.MOTION_CLIP = 100.0                  # max center offset in pixels (circular clip)
 cfg.TEST.MOTION_WARMUP_FRAMES = 2             # skip motion prior for first N frames
+cfg.TEST.MOTION_CONF_THRESHOLD = 0.5          # confidence below which motion weight is reduced
 
 
 

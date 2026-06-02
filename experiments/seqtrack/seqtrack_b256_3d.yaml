@@ -79,9 +79,12 @@ TEST:
     SATSOT: 0.45
     VISO: 0.45
 
-  # Motion Search Center: shift search crop before feature extraction.
+  # Motion Search Center: SOFT guidance for search crop center.
+  # Uses (1-alpha)*fallback + alpha*predicted blending — does NOT hard-replace.
   # Uncomment to enable; leave commented or set USE=False for baseline behavior.
   USE_MOTION_SEARCH_CENTER: true
   MOTION_MODEL: constant_velocity   # "constant_velocity" or "constant_acceleration"
-  MOTION_CLIP: 100.0                # max center offset in pixels (circular clip)
+  MOTION_ALPHA: 0.05                 # base blend weight (small! 0.05~0.2 recommended)
+  MOTION_CLIP: 15.0                # max center offset in pixels (circular clip)
   MOTION_WARMUP_FRAMES: 2           # skip motion prior for first N frames
+  MOTION_CONF_THRESHOLD: 0.5        # confidence below which motion weight is reduced

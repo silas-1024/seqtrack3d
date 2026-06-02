@@ -33,24 +33,31 @@ class SEQTRACK(BaseTracker):
         self.debug = params.debug
         self.frame_id = 0
 
-        # ---- Motion Prior: search-crop center prediction ----
+        # ---- Motion Prior: search-crop center SOFT guidance ----
         # When enabled, the motion model predicts where the target will be
-        # in the next frame, and shifts the search crop BEFORE feature extraction.
-        # The model's encoder/decoder/box-head remain unchanged.
-        # No post-hoc correction is applied to the output box.
+        # in the next frame, and SOFTLY blends with the fallback center to
+        # gently guide the search crop. The model's encoder/decoder remain unchanged.
+        # No post-hoc correction is applied.
         use_motion_search = getattr(self.cfg.TEST, 'USE_MOTION_SEARCH_CENTER', False)
         motion_model = getattr(self.cfg.TEST, 'MOTION_MODEL', 'constant_velocity')
+        motion_alpha = getattr(self.cfg.TEST, 'MOTION_ALPHA', 0.1)
         motion_clip = getattr(self.cfg.TEST, 'MOTION_CLIP', 100.0)
         motion_warmup = getattr(self.cfg.TEST, 'MOTION_WARMUP_FRAMES', 2)
+        motion_conf_thresh = getattr(self.cfg.TEST, 'MOTION_CONF_THRESHOLD', 0.5)
         self.motion_prior = MotionPrior(
             use=use_motion_search,
             model=motion_model,
+            alpha=motion_alpha,
             clip=motion_clip,
             warmup_frames=motion_warmup,
+            conf_threshold=motion_conf_thresh,
         )
+        # Track previous frame's confidence for motion prior attenuation
+        self._prev_conf_score = None
         if use_motion_search:
             print(f"[MotionSearch] Enabled: model={motion_model}, "
-                  f"clip={motion_clip:.0f}px, warmup={motion_warmup}frames")
+                  f"alpha={motion_alpha}, clip={motion_clip:.0f}px, "
+                  f"warmup={motion_warmup}frames, conf_thresh={motion_conf_thresh}")
         else:
             print("[MotionSearch] Disabled (baseline mode)")
         # ----------------------------------------------------
@@ -101,27 +108,45 @@ class SEQTRACK(BaseTracker):
         H, W, _ = image.shape
         self.frame_id += 1
 
-        # ===== Motion Prior: compute search crop center =====
-        # observed_center: model's output center from the previous frame
+        # ===== Motion Prior: compute search crop center via SOFT blending =====
+        #
+        # Three centers (all in original image coordinates):
+        #   observed_center  : model's raw output center from PREVIOUS frame
+        #   predicted_center : motion model forecast for THIS frame
+        #   search_center    : soft_blend(observed, predicted) → used for crop
+        #
+        # History update rule:
+        #   - At start of frame t: update history with frame t-1's OBSERVED center
+        #   - Then predict frame t's center from history
+        #   - Frame t's OBSERVED center is NOT added until start of frame t+1
+        #   - This avoids "update then predict in same frame" confusion
+        # ==============================================================
+
+        # observed_center: model's output center from the PREVIOUS frame
         observed_cx = self.state[0] + 0.5 * self.state[2]
         observed_cy = self.state[1] + 0.5 * self.state[3]
 
-        # Feed observed center into motion history (NOT motion-corrected center)
+        # Feed PREVIOUS frame's observed center into motion history
+        # (NOT motion-corrected center — avoids compounding error)
         if self.motion_prior.use:
             self.motion_prior.update(observed_cx, observed_cy)
 
-        # Get the search crop center from motion prior
-        #   - If disabled: uses observed_center (baseline behavior)
-        #   - If enabled + warmup passed: uses predicted center (clipped)
-        #   - If enabled but warmup not passed: uses observed_center
-        search_cx, search_cy, motion_weight, self._motion_info = \
+        # Get the search crop center via SOFT blending:
+        #   search_center = (1 - eff_alpha) * observed + eff_alpha * predicted
+        #   - If disabled: eff_alpha = 0 → search_center = observed (baseline)
+        #   - If enabled + warmup passed: eff_alpha = alpha * conf_weight * dist_weight
+        #   - If enabled but warmup not passed: eff_alpha = 0 (fallback)
+        #   - Uses PREVIOUS frame's confidence for attenuation
+        search_cx, search_cy, eff_alpha, self._motion_info = \
             self.motion_prior.get_search_center(
                 fallback_cx=observed_cx,
                 fallback_cy=observed_cy,
+                conf_score=self._prev_conf_score,
                 img_W=W, img_H=H,
             )
 
-        # Store for map_box_back() — must reflect the ACTUAL center used for cropping
+        # Store for map_box_back() — MUST reflect the ACTUAL center used for cropping.
+        # This ensures geometric consistency: crop coordinate system == map_back reference.
         self.search_crop_center = (search_cx, search_cy)
 
         # Construct a temporary bounding box centered at search_crop_center
@@ -166,6 +191,8 @@ class SEQTRACK(BaseTracker):
 
         # update the template
         conf_score = out_dict['confidence'].sum().item() * 10  # the confidence score
+        # Store for next frame's motion prior attenuation
+        self._prev_conf_score = conf_score
 
         if self.num_template > 1:
             if (self.frame_id % self.update_intervals == 0) and (conf_score > self.update_threshold):
@@ -189,8 +216,18 @@ class SEQTRACK(BaseTracker):
                 "motion_prior": self._motion_info}
 
     def map_box_back(self, pred_box: list, resize_factor: float):
-        # Use the ACTUAL search crop center (may differ from self.state center
-        # when motion prior is enabled), not the previous frame's box center.
+        """
+        Map predicted box from crop coordinates back to original image coordinates.
+
+        Geometry guarantee:
+          - self.search_crop_center = the ACTUAL center used by sample_target()
+            for cropping (i.e., the center of search_bb passed to sample_target).
+          - This center is the coordinate system origin for mapping back.
+          - No hand-reconstructed center is used; always read from
+            self.search_crop_center which is set atomically in track().
+          - This ensures the crop coordinate system and the back-mapping
+            coordinate system are strictly identical.
+        """
         cx_prev, cy_prev = self.search_crop_center
         cx, cy, w, h = pred_box
         half_side = 0.5 * self.params.search_size / resize_factor
