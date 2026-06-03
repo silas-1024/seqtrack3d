@@ -110,24 +110,6 @@ cfg.TEST.UPDATE_THRESHOLD.SV248S_TEST = 0.475
 cfg.TEST.UPDATE_THRESHOLD.SATSOT = 0.475
 cfg.TEST.UPDATE_THRESHOLD.VISO = 0.475
 
-# MOTION SEARCH CENTER (inference-only search-crop center SOFT guidance)
-# When enabled, a tiny learnable MLP (or rule-based CV/CA) predicts the
-# next-frame center OFFSET and SOFTLY blends it with the fallback center
-# to gently guide the search crop.  The model encoder/decoder are unchanged.
-# Default off (baseline behavior unchanged).
-#
-# MOTION_MODEL options:
-#   "mlp"                 : learnable MLP (recommended)
-#   "constant_velocity"   : c_hat = c_t + (c_t - c_{t-1})
-#   "constant_acceleration": c_hat = c_t + v_t + 0.5*a_t
-cfg.TEST.USE_MOTION_SEARCH_CENTER = False
-cfg.TEST.MOTION_MODEL = "mlp"                 # "mlp" / "constant_velocity" / "constant_acceleration"
-cfg.TEST.MOTION_ALPHA = 0.1                   # base blend weight (small ~0.05-0.2)
-cfg.TEST.MOTION_CLIP = 100.0                  # max offset in pixels (circular clip radius)
-cfg.TEST.MOTION_WARMUP_FRAMES = 2             # skip motion prior for first N frames
-cfg.TEST.MOTION_HISTORY_LEN = 4               # number of observed centers to retain
-cfg.TEST.MOTION_HIDDEN_DIM = 32               # hidden dim of MLP (ignored for CV/CA)
-cfg.TEST.MOTION_CONF_THRESHOLD = 0.5          # confidence below which motion weight decays
 
 
 
