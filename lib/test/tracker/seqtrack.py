@@ -33,16 +33,19 @@ class SEQTRACK(BaseTracker):
         self.debug = params.debug
         self.frame_id = 0
 
-        # ---- Motion Prior: search-crop center SOFT guidance ----
-        # When enabled, the motion model predicts where the target will be
-        # in the next frame, and SOFTLY blends with the fallback center to
-        # gently guide the search crop. The model's encoder/decoder remain unchanged.
+        # ---- Motion Prior: MLP-based search-crop center SOFT guidance ----
+        # When enabled, a tiny learnable MLP predicts the next-frame center
+        # OFFSET (Δx, Δy) from historical observed centers.  The predicted
+        # center is SOFTLY blended with the fallback center to gently guide
+        # the search crop — the model's encoder/decoder/box-head remain unchanged.
         # No post-hoc correction is applied.
         use_motion_search = getattr(self.cfg.TEST, 'USE_MOTION_SEARCH_CENTER', False)
         motion_model = getattr(self.cfg.TEST, 'MOTION_MODEL', 'constant_velocity')
         motion_alpha = getattr(self.cfg.TEST, 'MOTION_ALPHA', 0.1)
         motion_clip = getattr(self.cfg.TEST, 'MOTION_CLIP', 100.0)
         motion_warmup = getattr(self.cfg.TEST, 'MOTION_WARMUP_FRAMES', 2)
+        motion_history_len = getattr(self.cfg.TEST, 'MOTION_HISTORY_LEN', 4)
+        motion_hidden_dim = getattr(self.cfg.TEST, 'MOTION_HIDDEN_DIM', 32)
         motion_conf_thresh = getattr(self.cfg.TEST, 'MOTION_CONF_THRESHOLD', 0.5)
         self.motion_prior = MotionPrior(
             use=use_motion_search,
@@ -50,14 +53,21 @@ class SEQTRACK(BaseTracker):
             alpha=motion_alpha,
             clip=motion_clip,
             warmup_frames=motion_warmup,
+            history_len=motion_history_len,
+            hidden_dim=motion_hidden_dim,
             conf_threshold=motion_conf_thresh,
         )
+        # Move MLP (if any) to GPU
+        self.motion_prior.to('cuda')
+        self.motion_prior.eval()
         # Track previous frame's confidence for motion prior attenuation
         self._prev_conf_score = None
         if use_motion_search:
             print(f"[MotionSearch] Enabled: model={motion_model}, "
                   f"alpha={motion_alpha}, clip={motion_clip:.0f}px, "
-                  f"warmup={motion_warmup}frames, conf_thresh={motion_conf_thresh}")
+                  f"warmup={motion_warmup}frames, "
+                  f"history_len={motion_history_len}, hidden_dim={motion_hidden_dim}, "
+                  f"conf_thresh={motion_conf_thresh}")
         else:
             print("[MotionSearch] Disabled (baseline mode)")
         # ----------------------------------------------------
