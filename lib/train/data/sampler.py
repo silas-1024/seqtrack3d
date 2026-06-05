@@ -169,6 +169,27 @@ class TrackingSampler(torch.utils.data.Dataset):
                 H, W, _ = template_frames[0].shape
                 template_masks = template_anno['mask'] if 'mask' in template_anno else [torch.zeros((H, W))] * self.num_template_frames
                 search_masks = search_anno['mask'] if 'mask' in search_anno else [torch.zeros((H, W))] * self.num_search_frames
+
+                # ---- RMP-SeqTrack: extract REAL historical boxes (strictly PAST frames) ----
+                # Causal: history = [t-N, ..., t-1], predict bbox_t
+                raw_bboxes = seq_info_dict['bbox']           # [num_frames, 4] in abs pixels [x,y,w,h]
+                current_fid = search_frame_ids[0]             # int – the search frame index (t)
+                N_hist = 5
+                start_fid = max(0, current_fid - N_hist)     # t-N  (exclude current frame)
+                end_fid = current_fid                        # t    (exclusive upper bound)
+
+                if start_fid < end_fid:
+                    hist_boxes = raw_bboxes[start_fid:end_fid].clone().float()
+                    if hist_boxes.shape[0] < N_hist:
+                        pad = hist_boxes[0:1].repeat(N_hist - hist_boxes.shape[0], 1)
+                        hist_boxes = torch.cat([pad, hist_boxes], dim=0)
+                else:
+                    # Edge case: frame 0 has no past → fill with dummy (all-zero)
+                    hist_boxes = torch.zeros(N_hist, 4, dtype=torch.float32)
+
+                scale = torch.tensor([W, H, W, H], dtype=torch.float32)
+                historical_boxes = (hist_boxes / scale).clamp(0.0, 1.0)     # [N_hist, 4] in [0,1]
+
                 data = TensorDict({'template_images': template_frames,
                                    'template_anno': template_anno['bbox'],
                                    'template_masks': template_masks,
@@ -176,7 +197,8 @@ class TrackingSampler(torch.utils.data.Dataset):
                                    'search_anno': search_anno['bbox'],
                                    'search_masks': search_masks,
                                    'dataset': dataset.get_name(),
-                                   'test_class': meta_obj_test.get('object_class_name')})
+                                   'test_class': meta_obj_test.get('object_class_name'),
+                                   'historical_boxes': historical_boxes})
 
                 # tokenize language
                 if self.multi_modal_language:

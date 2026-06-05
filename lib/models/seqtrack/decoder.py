@@ -64,7 +64,7 @@ class SeqTrackDecoder(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
-    def forward(self, src, pos_embed, seq):
+    def forward(self, src, pos_embed, seq, motion_bias=None):
         # flatten NxCxHxW to HWxNxC
         n, bs, c = src.shape
         tgt = self.embedding(seq).permute(1, 0, 2)
@@ -77,13 +77,13 @@ class SeqTrackDecoder(nn.Module):
         tgt_mask = generate_square_subsequent_mask(len(tgt)).to(tgt.device) #generate the causal mask
 
         hs = self.body(tgt, memory, pos=pos_embed, query_pos=query_embed[:len(tgt)],
-                       tgt_mask=tgt_mask, memory_mask=None)
+                       tgt_mask=tgt_mask, memory_mask=None, motion_bias=motion_bias)
 
         return hs.transpose(1, 2)
 
 
     def inference(self, src, pos_embed, seq, vocab_embed,
-                  window, seq_format):
+                  window, seq_format, motion_bias=None):
         # flatten NxCxHxW to HWxNxC
         n, bs, c = src.shape
         memory = src
@@ -100,7 +100,7 @@ class SeqTrackDecoder(nn.Module):
             tgt_mask = generate_square_subsequent_mask(len(tgt)).to(tgt.device)
 
             hs = self.body(tgt, memory, pos=pos_embed[:len(memory)], query_pos=query_embed[:len(tgt)],
-                              tgt_mask=tgt_mask, memory_mask=None)
+                              tgt_mask=tgt_mask, memory_mask=None, motion_bias=motion_bias)
 
             # embedding --> likelihood
             out = vocab_embed(hs.transpose(1, 2)[-1, :, -1, :])
@@ -151,7 +151,8 @@ class TransformerDecoder(nn.Module):
                 tgt_key_padding_mask: Optional[Tensor] = None,
                 memory_key_padding_mask: Optional[Tensor] = None,
                 pos: Optional[Tensor] = None,
-                query_pos: Optional[Tensor] = None):
+                query_pos: Optional[Tensor] = None,
+                motion_bias: Optional[Tensor] = None):
         output = tgt
 
         intermediate = []
@@ -161,7 +162,8 @@ class TransformerDecoder(nn.Module):
                            memory_mask=memory_mask,
                            tgt_key_padding_mask=tgt_key_padding_mask,
                            memory_key_padding_mask=memory_key_padding_mask,
-                           pos=pos, query_pos=query_pos)
+                           pos=pos, query_pos=query_pos,
+                           motion_bias=motion_bias)
 
             if self.return_intermediate:
                 intermediate.append(self.norm(output))
@@ -209,15 +211,26 @@ class TransformerDecoderLayer(nn.Module):
                      tgt_key_padding_mask: Optional[Tensor] = None,
                      memory_key_padding_mask: Optional[Tensor] = None,
                      pos: Optional[Tensor] = None,
-                     query_pos: Optional[Tensor] = None):
+                     query_pos: Optional[Tensor] = None,
+                     motion_bias: Optional[Tensor] = None):
         q = k = self.with_pos_embed(tgt, query_pos)
         tgt2 = self.self_attn(q, k, tgt, attn_mask=tgt_mask,
                               key_padding_mask=tgt_key_padding_mask)[0]
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)
+
+        # Motion-guided cross attention: channel-wise FiLM gating on V.
+        # Unlike additive K-bias (which softmax cancels), this modulates
+        # the VALUE stream per-channel based on motion context.
+        memory_v = memory
+        if motion_bias is not None:
+            # motion_bias: [B, D] → gate [B, D] via sigmoid → broadcast [1, B, D]
+            gate = motion_bias.sigmoid().unsqueeze(0)        # [1, B, D]
+            memory_v = memory * gate                         # [S, B, D]
+
         tgt2 = self.multihead_attn(self.with_pos_embed(tgt, query_pos),
                                    self.with_pos_embed(memory, pos),
-                                   memory, attn_mask=memory_mask,
+                                   memory_v, attn_mask=memory_mask,
                                    key_padding_mask=memory_key_padding_mask)[0]
 
         tgt = tgt + self.dropout2(tgt2)
@@ -234,16 +247,24 @@ class TransformerDecoderLayer(nn.Module):
                     tgt_key_padding_mask: Optional[Tensor] = None,
                     memory_key_padding_mask: Optional[Tensor] = None,
                     pos: Optional[Tensor] = None,
-                    query_pos: Optional[Tensor] = None):
+                    query_pos: Optional[Tensor] = None,
+                    motion_bias: Optional[Tensor] = None):
         tgt2 = self.norm1(tgt)
         q = k = self.with_pos_embed(tgt2, query_pos)
         tgt2 = self.self_attn(q, k, tgt2, attn_mask=tgt_mask,
                               key_padding_mask=tgt_key_padding_mask)[0]
         tgt = tgt + self.dropout1(tgt2)
         tgt2 = self.norm2(tgt)
+
+        # Motion-guided cross attention: channel-wise FiLM gating on V.
+        memory_v = memory
+        if motion_bias is not None:
+            gate = motion_bias.sigmoid().unsqueeze(0)        # [1, B, D]
+            memory_v = memory * gate                         # [S, B, D]
+
         tgt2 = self.multihead_attn(self.with_pos_embed(tgt2, query_pos),
                                    self.with_pos_embed(memory, pos),
-                                   memory, attn_mask=memory_mask,
+                                   memory_v, attn_mask=memory_mask,
                                    key_padding_mask=memory_key_padding_mask)[0]
         tgt = tgt + self.dropout2(tgt2)
         tgt2 = self.norm3(tgt)
@@ -257,12 +278,15 @@ class TransformerDecoderLayer(nn.Module):
                 tgt_key_padding_mask: Optional[Tensor] = None,
                 memory_key_padding_mask: Optional[Tensor] = None,
                 pos: Optional[Tensor] = None,
-                query_pos: Optional[Tensor] = None):
+                query_pos: Optional[Tensor] = None,
+                motion_bias: Optional[Tensor] = None):
         if self.normalize_before:
             return self.forward_pre(tgt, memory, tgt_mask, memory_mask,
-                                    tgt_key_padding_mask, memory_key_padding_mask, pos, query_pos)
+                                    tgt_key_padding_mask, memory_key_padding_mask,
+                                    pos, query_pos, motion_bias)
         return self.forward_post(tgt, memory, tgt_mask, memory_mask,
-                                 tgt_key_padding_mask, memory_key_padding_mask, pos, query_pos)
+                                 tgt_key_padding_mask, memory_key_padding_mask,
+                                 pos, query_pos, motion_bias)
 
 
 def _get_clones(module, N):

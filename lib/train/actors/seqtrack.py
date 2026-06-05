@@ -4,7 +4,7 @@ import torch
 
 
 class SeqTrackActor(BaseActor):
-    """ Actor for training the SeqTrack"""
+    """ Actor for training the SeqTrack (with optional RMP motion module)"""
     def __init__(self, net, objective, loss_weight, settings, cfg):
         super().__init__(net, objective)
         self.loss_weight = loss_weight
@@ -13,21 +13,41 @@ class SeqTrackActor(BaseActor):
         self.BINS = cfg.MODEL.BINS
         self.seq_format = cfg.DATA.SEQ_FORMAT
 
+        # Motion config
+        motion_cfg = getattr(cfg.MODEL, 'MOTION', None)
+        self.enable_motion = (motion_cfg is not None and motion_cfg.get('ENABLE', False))
+        # Default to 0.0 — only enable motion aux loss after verifying cross-attention works.
+        self.motion_loss_weight = motion_cfg.get('MOTION_LOSS_WEIGHT', 0.0) if motion_cfg else 0.0
+        self.history_length = motion_cfg.get('HISTORY_LENGTH', 5) if motion_cfg else 5
+
+        # ---- RMP diagnostic counter ----
+        self.iteration = 0
+
     def __call__(self, data):
         """
         args:
             data - The input data, should contain the fields 'template', 'search', 'search_anno'.
+                   When MOTION.ENABLE=True, also contains 'historical_boxes' [B, N, 4] in xywh [0,1].
             template_images: (N_t, batch, 3, H, W)
             search_images: (N_s, batch, 3, H, W)
         returns:
             loss    - the training loss
             status  -  dict containing detailed losses
         """
+        # ---- RMP diagnostic: increment global iteration ----
+        self.iteration += 1
+
         # forward pass
-        outputs, target_seqs = self.forward_pass(data)
+        result = self.forward_pass(data)
+
+        if self.enable_motion:
+            outputs, target_seqs, motion_aux = result
+        else:
+            outputs, target_seqs = result
+            motion_aux = None
 
         # compute losses
-        loss, status = self.compute_losses(outputs, target_seqs)
+        loss, status = self.compute_losses(outputs, target_seqs, motion_aux)
 
         return loss, status
 
@@ -54,13 +74,19 @@ class SeqTrackActor(BaseActor):
         if self.seq_format != 'corner':
             targets = box_xyxy_to_cxcywh(targets)
 
+        # ---- Extract REAL historical boxes (pre-computed by sampler from video annotation) ----
+        historical_boxes = None
+        if self.enable_motion and 'historical_boxes' in data:
+            # historical_boxes is [B, N, 4] in [x,y,w,h] format, normalized [0,1]
+            historical_boxes = data['historical_boxes']
+
         box = (targets * (bins - 1)).int() # discretize the coordinates
 
         if self.seq_format == 'whxy':
             box = box[:, [2, 3, 0, 1]]
 
         batch = box.shape[0]
-        # inpute sequence
+        # input sequence
         input_start = torch.ones([batch, 1]).to(box) * start
         input_seqs = torch.cat([input_start, box], dim=1)
         input_seqs = input_seqs.reshape(b,n,input_seqs.shape[-1])
@@ -73,17 +99,40 @@ class SeqTrackActor(BaseActor):
         target_seqs = target_seqs.flatten()
         target_seqs = target_seqs.type(dtype=torch.int64)
 
-        outputs = self.net(xz=feature_xz, seq=input_seqs, mode="decoder")
+        if self.enable_motion:
+            outputs, motion_aux = self.net(
+                xz=feature_xz, seq=input_seqs, mode="decoder",
+                historical_boxes=historical_boxes, return_motion_aux=True
+            )
+            outputs = outputs[-1].reshape(-1, len_embedding)
+            return outputs, target_seqs, motion_aux
+        else:
+            outputs = self.net(xz=feature_xz, seq=input_seqs, mode="decoder")
+            outputs = outputs[-1].reshape(-1, len_embedding)
+            return outputs, target_seqs
 
-        outputs = outputs[-1].reshape(-1, len_embedding)
-
-        return outputs, target_seqs
-
-    def compute_losses(self, outputs, targets_seq, return_status=True):
+    def compute_losses(self, outputs, targets_seq, motion_aux=None, return_status=True):
         # Get loss
         ce_loss = self.objective['ce'](outputs, targets_seq)
         # weighted sum
         loss = self.loss_weight['ce'] * ce_loss
+
+        # Motion auxiliary loss (default weight=0 — enable after verifying cross-attn works)
+        motion_loss_val = 0.0
+        proto_w = reliability = motion_bias = motion_feat = deltas = None
+        if self.enable_motion and motion_aux is not None and motion_aux.get('motion_feature') is not None:
+            motion_loss = self.net.module.compute_motion_loss(motion_aux) \
+                if hasattr(self.net, 'module') else self.net.compute_motion_loss(motion_aux)
+            loss = loss + self.motion_loss_weight * motion_loss
+            motion_loss_val = motion_loss.item()
+
+            # ---- Monitoring metrics ----
+            proto_w     = motion_aux.get('proto_weights')     # [B, K]
+            raw_score   = motion_aux.get('raw_score')         # [B, K]  pre-softmax
+            reliability = motion_aux.get('reliability')        # [B, N-1]
+            motion_bias = motion_aux.get('motion_bias')        # [B, D]
+            motion_feat = motion_aux.get('motion_feature')     # [B, D]
+            deltas      = motion_aux.get('deltas')             # [B, N-1, 4]
 
         outputs = outputs.softmax(-1)
         outputs = outputs[:, :self.BINS]
@@ -96,8 +145,64 @@ class SeqTrackActor(BaseActor):
 
         if return_status:
             # status for log
-            status = {"Loss/total": loss.item(),
-                      "IoU": iou.item()}
+            status = {
+                "Loss/total": loss.item(),
+                "IoU": iou.item(),
+            }
+            if self.enable_motion:
+                status["Loss/motion"] = motion_loss_val
+                pmax = pent = gate_std = None  # init in case dict/encoder disabled
+                # ---- Monitor prototype activation ----
+                if proto_w is not None:
+                    pmax = proto_w.max(dim=-1)[0].mean().item()
+                    pent = (-proto_w * (proto_w + 1e-8).log()).sum(-1).mean().item()
+                    status["Motion/proto_max"]     = pmax
+                    status["Motion/proto_entropy"] = pent
+                # ---- Monitor reliability distribution ----
+                if reliability is not None:
+                    status["Motion/rel_mean"] = reliability.mean().item()
+                    status["Motion/rel_std"]  = reliability.std().item()
+                    status["Motion/rel_min"]  = reliability.min().item()
+                    status["Motion/rel_max"]  = reliability.max().item()
+                # ---- Monitor gate (sigmoid of motion_bias) ----
+                if motion_bias is not None:
+                    status["Motion/bias_norm"] = motion_bias.norm(dim=-1).mean().item()
+                    gate_std = motion_bias.sigmoid().std().item()
+                    status["Motion/gate_std"]  = gate_std
+                if motion_feat is not None:
+                    status["Motion/feat_norm"] = motion_feat.norm(dim=-1).mean().item()
+                if deltas is not None:
+                    status["Motion/delta_norm"] = deltas.norm(dim=-1).mean().item()
+                # ---- Monitor raw cosine scores (pre-softmax) ----
+                if raw_score is not None:
+                    status["Motion/score_max"]  = raw_score.max().item()
+                    status["Motion/score_std"]  = raw_score.std().item()
+
+                # ---- RMP diagnostics: print every 10 iters for first 3000 ----
+                if self.iteration <= 3000 and self.iteration % 10 == 1:
+                    pmax_str = f"{pmax:.4f}" if proto_w is not None else "N/A"
+                    pent_str = f"{pent:.4f}" if proto_w is not None else "N/A"
+                    gstd_str = f"{gate_std:.4f}" if gate_std is not None else "N/A"
+                    dnorm_str = f"{deltas.norm(dim=-1).mean().item():.4f}" if deltas is not None else "N/A"
+                    smax_str = f"{raw_score.max().item():.4f}" if raw_score is not None else "N/A"
+                    smin_str = f"{raw_score.min().item():.4f}" if raw_score is not None else "N/A"
+                    sstd_str = f"{raw_score.std().item():.4f}" if raw_score is not None else "N/A"
+                    print(f"[RMP iter {self.iteration:5d}] "
+                          f"proto_max={pmax_str}  proto_entropy={pent_str}  gate_std={gstd_str}  delta_norm={dnorm_str}  score=[{smin_str},{smax_str}]±{sstd_str}")
+                # ---- Print raw deltas for first 3 batches (scale verification) ----
+                if self.iteration <= 3 and deltas is not None and proto_w is not None:
+                    print(f"[RMP DELTA iter {self.iteration}] deltas[0] (scaled, 1st sample):\n{deltas[0]}")
+                    print(f"[RMP DELTA iter {self.iteration}] prototype_weights[0]: {proto_w[0].detach().cpu().numpy()}")
+
+                # ---- RMP guard: gate.std → 0 means V-gating is dead ----
+                GATE_STD_MIN = 0.02       # only panic if truly collapsed
+                WARMUP_ITERS = 3000       # enough time for Motion Encoder + Dictionary to warm up
+                if gate_std is not None and self.iteration > WARMUP_ITERS and gate_std < GATE_STD_MIN:
+                    raise RuntimeError(
+                        f"\n[RMP PANIC iter {self.iteration}] gate_std={gate_std:.5f} < {GATE_STD_MIN}. "
+                        f"Motion-guided V-gating has collapsed — all channels gated identically. "
+                        f"Training aborted.\n"
+                    )
             return loss, status
         else:
             return loss
