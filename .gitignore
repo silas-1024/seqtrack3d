@@ -14,3 +14,5 @@ pretrain/
 pretrained_models/
 checkpoints/
 logs/
+failure_analysis_results.json
+analyze_failures.py
