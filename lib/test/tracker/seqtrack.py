@@ -31,6 +31,13 @@ class SEQTRACK(BaseTracker):
         self.debug = params.debug
         self.frame_id = 0
 
+        # ---- RMP Motion Module: maintain rolling history of past boxes ----
+        self.enable_motion = getattr(self.cfg.MODEL, 'MOTION', None) is not None \
+                             and self.cfg.MODEL.MOTION.get('ENABLE', False)
+        self.history_length = self.cfg.MODEL.MOTION.get('HISTORY_LENGTH', 5) if self.enable_motion else 0
+        self.history_boxes = []  # list of [x,y,w,h] in absolute pixels, oldest first
+        self.image_wh = None     # (W, H) of the video frames
+
         # online update settings
         DATASET_NAME = dataset_name.upper()
         if hasattr(self.cfg.TEST.UPDATE_INTERVALS, DATASET_NAME):
@@ -61,10 +68,16 @@ class SEQTRACK(BaseTracker):
 
         self.state = info['init_bbox']
         self.frame_id = 0
+        self.image_wh = (image.shape[1], image.shape[0])  # (W, H)
+
+        # Initialise motion history with the first ground-truth box
+        if self.enable_motion:
+            self.history_boxes = [info['init_bbox']]
 
     def track(self, image, info: dict = None):
         H, W, _ = image.shape
         self.frame_id += 1
+        self.image_wh = (W, H)
         x_patch_arr, resize_factor = sample_target(image, self.state, self.params.search_factor,
                                                    output_sz=self.params.search_size)  # (x1, y1, w, h)
         search = self.preprocessor.process(x_patch_arr)
@@ -74,12 +87,27 @@ class SEQTRACK(BaseTracker):
         with torch.no_grad():
             xz = self.network.forward_encoder(images_list)
 
+        # ---- Build historical_boxes for MotionModule ----
+        historical_boxes = None
+        if self.enable_motion and len(self.history_boxes) > 0:
+            # Maintain exactly history_length past boxes (causal: [t-N, ..., t-1])
+            # If we have fewer than history_length, pad with the oldest available box
+            hist = self.history_boxes[-self.history_length:]  # most recent N
+            if len(hist) < self.history_length:
+                pad = [hist[0]] * (self.history_length - len(hist))
+                hist = pad + hist
+            hist_t = torch.tensor(hist, dtype=torch.float32, device=xz[0].device)  # [N, 4] abs pixels
+            scale = torch.tensor([W, H, W, H], dtype=torch.float32, device=xz[0].device)
+            historical_boxes = (hist_t / scale).clamp(0.0, 1.0)  # [N, 4] in [0,1]
+            historical_boxes = historical_boxes.unsqueeze(0)      # [1, N, 4] add batch dim
+
         # run the decoder
         with torch.no_grad():
             out_dict = self.network.inference_decoder(xz=xz,
                                                       sequence=self.init_seq,
                                                       window=self.hanning,
-                                                      seq_format=self.seq_format)
+                                                      seq_format=self.seq_format,
+                                                      historical_boxes=historical_boxes)
 
         pred_boxes = out_dict['pred_boxes'].view(-1, 4)
 
@@ -94,6 +122,12 @@ class SEQTRACK(BaseTracker):
 
         # get the final box result
         self.state = clip_box(self.map_box_back(pred_box, resize_factor), H, W, margin=1)
+
+        # ---- Update motion history ----
+        if self.enable_motion:
+            self.history_boxes.append(list(self.state))
+            if len(self.history_boxes) > self.history_length:
+                self.history_boxes.pop(0)
 
         # update the template
         conf_score = out_dict['confidence'].sum().item() * 10  # the confidence score

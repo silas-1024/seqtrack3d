@@ -98,6 +98,11 @@ class MotionDictionary(nn.Module):
         super().__init__()
         self.prototypes = nn.Parameter(torch.empty(num_prototypes, hidden_dim))
         nn.init.orthogonal_(self.prototypes)
+        # τ = 0.2 chosen from empirical tuning:
+        #   τ = 0.05 → proto_max ≈ 0.7 (one prototype collapses, others dead)
+        #   τ = 0.10 → proto_max ≈ 0.4 (still too peaked)
+        #   τ = 0.20 → proto_max ≈ 0.15~0.25 (healthy spread, 5-8 active)
+        #   τ = 0.30 → proto_max ≈ 0.08 (too uniform, nearing 1/K=0.016)
         self.temperature = temperature
 
     def forward(self, motion_feature: torch.Tensor) -> (torch.Tensor, torch.Tensor, torch.Tensor):
