@@ -119,7 +119,7 @@ class SeqTrackActor(BaseActor):
 
         # Motion auxiliary loss (default weight=0 — enable after verifying cross-attn works)
         motion_loss_val = 0.0
-        proto_w = reliability = motion_bias = motion_feat = deltas = None
+        reliability = motion_bias = motion_feat = deltas = None
         if self.enable_motion and motion_aux is not None and motion_aux.get('motion_feature') is not None:
             motion_loss = self.net.module.compute_motion_loss(motion_aux) \
                 if hasattr(self.net, 'module') else self.net.compute_motion_loss(motion_aux)
@@ -127,8 +127,6 @@ class SeqTrackActor(BaseActor):
             motion_loss_val = motion_loss.item()
 
             # ---- Monitoring metrics ----
-            proto_w     = motion_aux.get('proto_weights')     # [B, K]
-            raw_score   = motion_aux.get('raw_score')         # [B, K]  pre-softmax
             reliability = motion_aux.get('reliability')        # [B, N-1]
             motion_bias = motion_aux.get('motion_bias')        # [B, D]
             motion_feat = motion_aux.get('motion_feature')     # [B, D]
@@ -151,13 +149,7 @@ class SeqTrackActor(BaseActor):
             }
             if self.enable_motion:
                 status["Loss/motion"] = motion_loss_val
-                pmax = pent = gate_std = None  # init in case dict/encoder disabled
-                # ---- Monitor prototype activation ----
-                if proto_w is not None:
-                    pmax = proto_w.max(dim=-1)[0].mean().item()
-                    pent = (-proto_w * (proto_w + 1e-8).log()).sum(-1).mean().item()
-                    status["Motion/proto_max"]     = pmax
-                    status["Motion/proto_entropy"] = pent
+                gate_std = None
                 # ---- Monitor reliability distribution ----
                 if reliability is not None:
                     status["Motion/rel_mean"] = reliability.mean().item()
@@ -173,30 +165,20 @@ class SeqTrackActor(BaseActor):
                     status["Motion/feat_norm"] = motion_feat.norm(dim=-1).mean().item()
                 if deltas is not None:
                     status["Motion/delta_norm"] = deltas.norm(dim=-1).mean().item()
-                # ---- Monitor raw cosine scores (pre-softmax) ----
-                if raw_score is not None:
-                    status["Motion/score_max"]  = raw_score.max().item()
-                    status["Motion/score_std"]  = raw_score.std().item()
 
                 # ---- RMP diagnostics: print every 10 iters for first 3000 ----
                 if self.iteration <= 3000 and self.iteration % 10 == 1:
-                    pmax_str = f"{pmax:.4f}" if proto_w is not None else "N/A"
-                    pent_str = f"{pent:.4f}" if proto_w is not None else "N/A"
                     gstd_str = f"{gate_std:.4f}" if gate_std is not None else "N/A"
                     dnorm_str = f"{deltas.norm(dim=-1).mean().item():.4f}" if deltas is not None else "N/A"
-                    smax_str = f"{raw_score.max().item():.4f}" if raw_score is not None else "N/A"
-                    smin_str = f"{raw_score.min().item():.4f}" if raw_score is not None else "N/A"
-                    sstd_str = f"{raw_score.std().item():.4f}" if raw_score is not None else "N/A"
                     print(f"[RMP iter {self.iteration:5d}] "
-                          f"proto_max={pmax_str}  proto_entropy={pent_str}  gate_std={gstd_str}  delta_norm={dnorm_str}  score=[{smin_str},{smax_str}]±{sstd_str}")
+                          f"gate_std={gstd_str}  delta_norm={dnorm_str}")
                 # ---- Print raw deltas for first 3 batches (scale verification) ----
-                if self.iteration <= 3 and deltas is not None and proto_w is not None:
+                if self.iteration <= 3 and deltas is not None:
                     print(f"[RMP DELTA iter {self.iteration}] deltas[0] (scaled, 1st sample):\n{deltas[0]}")
-                    print(f"[RMP DELTA iter {self.iteration}] prototype_weights[0]: {proto_w[0].detach().cpu().numpy()}")
 
                 # ---- RMP guard: gate.std → 0 means V-gating is dead ----
                 GATE_STD_MIN = 0.02       # only panic if truly collapsed
-                WARMUP_ITERS = 3000       # enough time for Motion Encoder + Dictionary to warm up
+                WARMUP_ITERS = 3000       # enough time for Motion Encoder to warm up
                 if gate_std is not None and self.iteration > WARMUP_ITERS and gate_std < GATE_STD_MIN:
                     raise RuntimeError(
                         f"\n[RMP PANIC iter {self.iteration}] gate_std={gate_std:.5f} < {GATE_STD_MIN}. "

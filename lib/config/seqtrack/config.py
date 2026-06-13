@@ -29,13 +29,11 @@ cfg.MODEL.DECODER.PRE_NORM = False
 cfg.MODEL.MOTION = edict()
 cfg.MODEL.MOTION.ENABLE = False                # Master switch for motion module
 cfg.MODEL.MOTION.HISTORY_LENGTH = 5             # N: number of historical boxes
-cfg.MODEL.MOTION.HIDDEN_DIM = 256               # Hidden dim for motion encoder / dict
-cfg.MODEL.MOTION.NUM_PROTOTYPES = 64            # K: number of motion prototypes
+cfg.MODEL.MOTION.HIDDEN_DIM = 256               # Hidden dim for motion encoder
 cfg.MODEL.MOTION.NUM_LAYERS = 2                 # Transformer encoder layers
 cfg.MODEL.MOTION.NUM_HEADS = 8                  # Attention heads
 cfg.MODEL.MOTION.MOTION_LOSS_WEIGHT = 0.0       # λ for L_motion (0.0 by default, enable after verifying cross-attn)
 cfg.MODEL.MOTION.ENABLE_RELIABILITY = True      # Ablation: reliability estimator
-cfg.MODEL.MOTION.ENABLE_MOTION_DICTIONARY = True  # Ablation: prototype dictionary
 cfg.MODEL.MOTION.ENABLE_MOTION_ENCODER = True   # Ablation: motion encoder (always True if ENABLE)
 cfg.MODEL.MOTION.ENABLE_MOTION_GUIDED_ATTN = True  # Ablation: motion bias in cross-attn
 
@@ -166,5 +164,3 @@ def update_config_from_file(filename):
     with open(filename) as f:
         exp_config = edict(yaml.safe_load(f))
         _update_config(cfg, exp_config)
-
-

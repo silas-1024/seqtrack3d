@@ -1,11 +1,10 @@
 """
-RMP-SeqTrack: Reliable Motion Prototype Motion Module.
+RMP-SeqTrack: Reliable Motion Module.
 
 Contains:
   - ReliabilityEstimator: assigns per-step reliability weights to motion deltas
   - MotionEncoder: TransformerEncoder over weighted motion sequence
-  - MotionDictionary: learnable prototype bank + soft read-out
-  - MotionModule: top-level wrapper with forward + auxiliary loss
+  - MotionModule: top-level wrapper with forward + diagnostics
 """
 
 import torch
@@ -81,78 +80,31 @@ class MotionEncoder(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# 3. Motion Dictionary (learnable prototypes)
-# ---------------------------------------------------------------------------
-class MotionDictionary(nn.Module):
-    """
-    Learnable prototype bank of shape [K, hidden_dim].
-    Soft-readout via cosine similarity + temperature-scaled softmax.
-
-    Without temperature, cos_sim between 256-dim random vectors clusters
-    tightly around 0 (std ≈ 1/√256 ≈ 0.06), making softmax near-uniform
-    (proto_max ≈ 1/K).  τ ≪ 1 sharpens the distribution so that a handful
-    of prototypes dominate.
-    """
-    def __init__(self, num_prototypes: int = 64, hidden_dim: int = 256,
-                 temperature: float = 0.05):
-        super().__init__()
-        self.prototypes = nn.Parameter(torch.empty(num_prototypes, hidden_dim))
-        nn.init.orthogonal_(self.prototypes)
-        # τ = 0.2 chosen from empirical tuning:
-        #   τ = 0.05 → proto_max ≈ 0.7 (one prototype collapses, others dead)
-        #   τ = 0.10 → proto_max ≈ 0.4 (still too peaked)
-        #   τ = 0.20 → proto_max ≈ 0.15~0.25 (healthy spread, 5-8 active)
-        #   τ = 0.30 → proto_max ≈ 0.08 (too uniform, nearing 1/K=0.016)
-        self.temperature = temperature
-
-    def forward(self, motion_feature: torch.Tensor) -> (torch.Tensor, torch.Tensor, torch.Tensor):
-        """
-        Args:
-            motion_feature: [B, hidden_dim]
-        Returns:
-            motion_token:    [B, hidden_dim]
-            proto_weights:   [B, K]   (for analysis / visualisation)
-            raw_score:       [B, K]   (pre-softmax, for monitoring)
-        """
-        motion_norm = F.normalize(motion_feature, dim=-1)          # [B, D]
-        proto_norm  = F.normalize(self.prototypes, dim=-1)          # [K, D]
-        raw_score   = motion_norm @ proto_norm.T                    # [B, K]
-        score       = raw_score / self.temperature                  # sharpen
-        proto_weights = score.softmax(dim=-1)                       # [B, K]
-        motion_token  = proto_weights @ self.prototypes              # [B, D]
-        return motion_token, proto_weights, raw_score
-
-
-# ---------------------------------------------------------------------------
-# 4. Motion Module  (top-level wrapper)
+# 3. Motion Module  (top-level wrapper)
 # ---------------------------------------------------------------------------
 class MotionModule(nn.Module):
     """
-    Full motion prototype pipeline:
+    Full motion pipeline:
 
       historical_boxes  →  motion deltas
                         →  ReliabilityEstimator
                         →  weighted motion
                         →  MotionEncoder  →  motion_feature
-                        →  MotionDictionary  →  motion_token
-                        →  MLP  →  motion_bias (for cross-attention K)
+                        →  MLP  →  motion_bias (for cross-attention V-gating)
 
     Returns motion_bias and auxiliary data for loss / analysis.
     """
     def __init__(self,
                  hidden_dim: int = 256,
                  history_length: int = 5,
-                 num_prototypes: int = 64,
                  num_layers: int = 2,
                  num_heads: int = 8,
                  enable_reliability: bool = True,
-                 enable_dictionary: bool = True,
                  motion_scale: float = 128.0):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.history_length = history_length
         self.enable_reliability = enable_reliability
-        self.enable_dictionary = enable_dictionary
         self.motion_scale = motion_scale
 
         self.reliability_estimator = ReliabilityEstimator(
@@ -166,12 +118,7 @@ class MotionModule(nn.Module):
             num_heads=num_heads,
         )
 
-        self.motion_dictionary = MotionDictionary(
-            num_prototypes=num_prototypes,
-            hidden_dim=hidden_dim,
-        ) if enable_dictionary else None
-
-        # MLP: motion_token → motion_bias  (256 → 256 → 256)
+        # MLP: motion_feature -> motion_bias  (256 -> 256 -> 256)
         self.bias_mlp = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(inplace=True),
@@ -202,8 +149,6 @@ class MotionModule(nn.Module):
             dict with keys:
               'motion_bias':      [B, hidden_dim]   for cross-attention
               'motion_feature':   [B, hidden_dim]   (aux, if return_aux)
-              'motion_token':     [B, hidden_dim]   (aux, if return_aux)
-              'proto_weights':    [B, K]            (aux, if return_aux)
               'reliability':      [B, N-1]          (aux, if return_aux)
         """
         B, N, _ = historical_boxes.shape
@@ -224,36 +169,19 @@ class MotionModule(nn.Module):
         # 3. Motion encoder
         motion_feature = self.motion_encoder(weighted_motion)  # [B, hidden_dim]
 
-        # 4. Motion dictionary
-        if self.enable_dictionary and self.motion_dictionary is not None:
-            motion_token, proto_weights, raw_score = self.motion_dictionary(motion_feature)
-        else:
-            motion_token = motion_feature
-            proto_weights = None
-            raw_score = None
-
-        # 5. MLP → motion bias, scaled by learnable gain for channel variance
-        motion_bias = self.bias_mlp(motion_token) * self.gate_gain   # [B, hidden_dim]
+        # 4. MLP -> motion bias, scaled by learnable gain for channel variance
+        motion_bias = self.bias_mlp(motion_feature) * self.gate_gain   # [B, hidden_dim]
         gate = motion_bias.sigmoid()                                   # sigmoid(±4) ≈ [0.02,0.98] at init
 
         out = {'motion_bias': motion_bias}
         if return_aux:
             out['motion_feature']  = motion_feature
-            out['motion_token']    = motion_token
-            out['proto_weights']   = proto_weights
             out['reliability']     = reliability
             out['deltas']          = deltas
-            out['raw_score']       = raw_score          # [B, K] pre-softmax
 
         return out
 
     def compute_motion_loss(self, aux: dict) -> torch.Tensor:
-        """
-        Auxiliary motion regularisation:
-          L_motion = 1 - cos_sim(motion_feature, sg(motion_token))
-        """
-        feat = aux['motion_feature']          # [B, D]
-        token = aux['motion_token'].detach()  # stop-gradient
-        cos_sim = F.cosine_similarity(feat, token, dim=-1)  # [B]
-        loss = (1.0 - cos_sim).mean()
-        return loss
+        """No auxiliary prototype loss is used in the nodict RMP variant."""
+        feat = aux['motion_feature']
+        return feat.new_tensor(0.0)

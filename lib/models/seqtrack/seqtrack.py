@@ -1,5 +1,5 @@
 """
-SeqTrack Model  (RMP-SeqTrack: Reliable Motion Prototype SeqTrack)
+SeqTrack Model  (RMP-SeqTrack: Reliable Motion SeqTrack)
 """
 import torch
 import math
@@ -51,11 +51,9 @@ class SEQTRACK(nn.Module):
             self.motion_module = MotionModule(
                 hidden_dim=motion_cfg.get('HIDDEN_DIM', hidden_dim),
                 history_length=motion_cfg.get('HISTORY_LENGTH', 5),
-                num_prototypes=motion_cfg.get('NUM_PROTOTYPES', 64),
                 num_layers=motion_cfg.get('NUM_LAYERS', 2),
                 num_heads=motion_cfg.get('NUM_HEADS', 8),
                 enable_reliability=motion_cfg.get('ENABLE_RELIABILITY', True),
-                enable_dictionary=motion_cfg.get('ENABLE_MOTION_DICTIONARY', True),
                 motion_scale=motion_cfg.get('MOTION_SCALE', 128.0),
             )
 
