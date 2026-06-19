@@ -34,7 +34,7 @@ cfg.MODEL.MOTION.NUM_LAYERS = 2                 # Transformer encoder layers
 cfg.MODEL.MOTION.NUM_HEADS = 8                  # Attention heads
 cfg.MODEL.MOTION.MOTION_LOSS_WEIGHT = 0.0       # λ for L_motion (0.0 by default, enable after verifying cross-attn)
 cfg.MODEL.MOTION.ENABLE_RELIABILITY = True      # Ablation: reliability estimator
-cfg.MODEL.MOTION.ENABLE_MOTION_ENCODER = True   # Ablation: motion encoder (always True if ENABLE)
+cfg.MODEL.MOTION.ENABLE_MOTION_ENCODER = True   # Ablation: enable Motion Encoder / RMP branch
 cfg.MODEL.MOTION.ENABLE_MOTION_GUIDED_ATTN = True  # Ablation: motion bias in cross-attn
 
 # TRAIN

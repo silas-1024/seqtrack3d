@@ -215,8 +215,38 @@ class SeqTrackProcessing(BaseProcessing):
         if self.transform['joint'] is not None:
             data['template_images'], data['template_anno'], data['template_masks'] = self.transform['joint'](
                 image=data['template_images'], bbox=data['template_anno'], mask=data['template_masks'])
-            data['search_images'], data['search_anno'], data['search_masks'] = self.transform['joint'](
-                image=data['search_images'], bbox=data['search_anno'], mask=data['search_masks'], new_roll=False)
+
+            search_anno_count = len(data['search_anno'])
+            joint_search_anno = list(data['search_anno'])
+            valid_hist_mask = None
+            hist_scale = None
+            if 'historical_boxes' in data:
+                hist_boxes = data['historical_boxes']
+                if isinstance(hist_boxes, torch.Tensor) and hist_boxes.numel() > 0:
+                    img_h, img_w = data['search_images'][0].shape[:2]
+                    hist_scale = torch.tensor(
+                        [img_w, img_h, img_w, img_h],
+                        dtype=hist_boxes.dtype,
+                        device=hist_boxes.device)
+                    valid_hist_mask = (hist_boxes[:, 2] > 0) & (hist_boxes[:, 3] > 0)
+                    hist_abs = hist_boxes[valid_hist_mask] * hist_scale
+                    joint_search_anno.extend(list(hist_abs))
+
+            # Apply the same joint horizontal flip to search annotations and
+            # valid history boxes. History boxes use top-left normalized xywh.
+            search_images, joint_search_anno, search_masks = self.transform['joint'](
+                image=data['search_images'], bbox=joint_search_anno,
+                mask=data['search_masks'], new_roll=False)
+            data['search_images'] = search_images
+            data['search_anno'] = joint_search_anno[:search_anno_count]
+            data['search_masks'] = search_masks
+
+            if hist_scale is not None and valid_hist_mask.any():
+                hist_boxes = data['historical_boxes'].clone()
+                transformed_hist = torch.stack(
+                    joint_search_anno[search_anno_count:], dim=0) / hist_scale
+                hist_boxes[valid_hist_mask] = transformed_hist
+                data['historical_boxes'] = hist_boxes
 
         s_list = ['template', 'search']
 
@@ -270,4 +300,3 @@ class SeqTrackProcessing(BaseProcessing):
             data = data.apply(lambda x: x[0] if isinstance(x, list) else x)
 
         return data
-

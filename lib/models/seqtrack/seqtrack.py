@@ -45,7 +45,10 @@ class SEQTRACK(nn.Module):
         self.enable_motion = False
         self.enable_motion_guided_attn = False
         self.motion_module = None
-        if motion_cfg is not None and motion_cfg.get('ENABLE', False):
+        motion_encoder_enabled = motion_cfg is not None \
+            and motion_cfg.get('ENABLE', False) \
+            and motion_cfg.get('ENABLE_MOTION_ENCODER', True)
+        if motion_encoder_enabled:
             self.enable_motion = True
             self.enable_motion_guided_attn = motion_cfg.get('ENABLE_MOTION_GUIDED_ATTN', True)
             self.motion_module = MotionModule(

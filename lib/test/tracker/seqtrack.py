@@ -33,7 +33,8 @@ class SEQTRACK(BaseTracker):
 
         # ---- RMP Motion Module: maintain rolling history of past boxes ----
         self.enable_motion = getattr(self.cfg.MODEL, 'MOTION', None) is not None \
-                             and self.cfg.MODEL.MOTION.get('ENABLE', False)
+                             and self.cfg.MODEL.MOTION.get('ENABLE', False) \
+                             and self.cfg.MODEL.MOTION.get('ENABLE_MOTION_ENCODER', True)
         self.history_length = self.cfg.MODEL.MOTION.get('HISTORY_LENGTH', 5) if self.enable_motion else 0
         self.history_boxes = []  # list of [x,y,w,h] in absolute pixels, oldest first
         self.image_wh = None     # (W, H) of the video frames

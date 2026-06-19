@@ -15,7 +15,9 @@ class SeqTrackActor(BaseActor):
 
         # Motion config
         motion_cfg = getattr(cfg.MODEL, 'MOTION', None)
-        self.enable_motion = (motion_cfg is not None and motion_cfg.get('ENABLE', False))
+        self.enable_motion = motion_cfg is not None \
+            and motion_cfg.get('ENABLE', False) \
+            and motion_cfg.get('ENABLE_MOTION_ENCODER', True)
         # Default to 0.0 — only enable motion aux loss after verifying cross-attention works.
         self.motion_loss_weight = motion_cfg.get('MOTION_LOSS_WEIGHT', 0.0) if motion_cfg else 0.0
         self.history_length = motion_cfg.get('HISTORY_LENGTH', 5) if motion_cfg else 5
