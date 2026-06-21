@@ -13,6 +13,18 @@ def parameters(yaml_name: str):
     update_config_from_file(yaml_file)
     params.cfg = cfg
     print("test config: ", cfg)
+    motion_cfg = getattr(cfg.MODEL, "MOTION", None)
+    motion_enabled = motion_cfg is not None \
+        and motion_cfg.get("ENABLE", False) \
+        and motion_cfg.get("ENABLE_MOTION_ENCODER", True)
+    v_gating_enabled = motion_enabled \
+        and motion_cfg.get("ENABLE_MOTION_GUIDED_ATTN", True)
+    print("[E1-raw-RMP-VGate]")
+    print(f"  motion enabled: {motion_enabled}")
+    print("  motion input: raw_delta (adjacent normalized xywh difference x 128)")
+    print(f"  decoder V-Gating enabled: {v_gating_enabled}")
+    print("  residual compensation: disabled")
+    print("  coordinate prior: disabled")
 
     params.yaml_name = yaml_name
     # template and search region

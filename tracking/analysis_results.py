@@ -23,7 +23,7 @@ dataset_name = 'sv248s_test' # choosen from 'uav', 'nfs', 'lasot_extension_subse
 
 # trackers.extend(trackerlist(name='seqtrack', parameter_name='seqtrack_l256_3d', dataset_name=dataset_name,
 #                             run_ids=None, display_name='seqtrack_l256_3d'))
-trackers.extend(trackerlist(name='seqtrack', parameter_name='seqtrack_b256_3d_rmp_nodict', dataset_name=dataset_name,
+trackers.extend(trackerlist(name='seqtrack', parameter_name='seqtrack_b256_rmp_no_motion', dataset_name=dataset_name,
                             run_ids=None, display_name='seqtrack_b256_3d'))
 # trackers.extend(trackerlist(name='seqtrack', parameter_name='seqtrack_b384_3d', dataset_name=dataset_name,
 #                             run_ids=None, display_name='seqtrack_b384_3d'))

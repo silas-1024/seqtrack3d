@@ -30,6 +30,18 @@ def run(settings):
         for key in cfg.keys():
             print("%s configuration:" % key, cfg[key])
             print('\n')
+        motion_cfg = getattr(cfg.MODEL, "MOTION", None)
+        motion_enabled = motion_cfg is not None \
+            and motion_cfg.get("ENABLE", False) \
+            and motion_cfg.get("ENABLE_MOTION_ENCODER", True)
+        v_gating_enabled = motion_enabled \
+            and motion_cfg.get("ENABLE_MOTION_GUIDED_ATTN", True)
+        print("[E1-raw-RMP-VGate]")
+        print(f"  motion enabled: {motion_enabled}")
+        print("  motion input: raw_delta (adjacent normalized xywh difference x 128)")
+        print(f"  decoder V-Gating enabled: {v_gating_enabled}")
+        print("  residual compensation: disabled")
+        print("  coordinate prior: disabled\n")
 
     # update settings based on cfg
     update_settings(settings, cfg)
@@ -93,4 +105,3 @@ def run(settings):
     # train process
     # trainer.train(cfg.TRAIN.EPOCH, load_latest=True, fail_safe=True, load_previous_ckpt=True,config_name = settings.config_name)
     trainer.train(cfg.TRAIN.EPOCH, load_latest=True, fail_safe=True, load_previous_ckpt=False,config_name = settings.config_name)
-
