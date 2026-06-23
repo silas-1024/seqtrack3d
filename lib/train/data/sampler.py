@@ -2,6 +2,8 @@ import random
 import torch.utils.data
 from lib.utils import TensorDict
 import numpy as np
+from lib.utils.global_motion import transform_xywh_box
+from lib.train.data.affine_cache import AffineCache
 # from pytorch_pretrained_bert import BertTokenizer
 import os
 
@@ -24,7 +26,10 @@ class TrackingSampler(torch.utils.data.Dataset):
     def __init__(self, datasets, p_datasets, samples_per_epoch, max_gap,
                  num_search_frames, num_template_frames=1, processing=no_processing, frame_sample_mode='causal',
                  train_cls=False, pos_prob=0.5, max_query_len=30,
-                 bert_model='bert-base-uncased', bert_path=None, multi_modal_language=False):
+                 bert_model='bert-base-uncased', bert_path=None, multi_modal_language=False,
+                 motion_delta_type='raw', history_length=5,
+                 affine_cache_enable=False, affine_cache_root='',
+                 affine_cache_fallback='identity'):
         """
         args:
             datasets - List of datasets to be used for training
@@ -57,6 +62,14 @@ class TrackingSampler(torch.utils.data.Dataset):
         self.processing = processing
         self.frame_sample_mode = frame_sample_mode
         self.multi_modal_language = multi_modal_language
+        self.motion_delta_type = str(motion_delta_type).lower()
+        if self.motion_delta_type not in ('raw', 'residual'):
+            raise ValueError("MOTION_DELTA_TYPE must be 'raw' or 'residual'")
+        self.history_length = history_length
+        self.affine_cache_enable = bool(affine_cache_enable)
+        self.affine_cache_root = affine_cache_root
+        self.affine_cache_fallback = affine_cache_fallback
+        self._affine_caches = {}
         # if multi_modal_language:
         #     self.max_query_len = max_query_len
         #     if bert_path is not None and os.path.exists(bert_path):
@@ -174,21 +187,75 @@ class TrackingSampler(torch.utils.data.Dataset):
                 # Causal: history = [t-N, ..., t-1], predict bbox_t
                 raw_bboxes = seq_info_dict['bbox']           # [num_frames, 4] in abs pixels [x,y,w,h]
                 current_fid = search_frame_ids[0]             # int – the search frame index (t)
-                N_hist = 5
+                N_hist = self.history_length
                 start_fid = max(0, current_fid - N_hist)     # t-N  (exclude current frame)
                 end_fid = current_fid                        # t    (exclusive upper bound)
 
                 if start_fid < end_fid:
                     hist_boxes = raw_bboxes[start_fid:end_fid].clone().float()
+                    hist_frame_ids = list(range(start_fid, end_fid))
                     if hist_boxes.shape[0] < N_hist:
-                        pad = hist_boxes[0:1].repeat(N_hist - hist_boxes.shape[0], 1)
+                        pad_count = N_hist - hist_boxes.shape[0]
+                        pad = hist_boxes[0:1].repeat(pad_count, 1)
                         hist_boxes = torch.cat([pad, hist_boxes], dim=0)
+                        hist_frame_ids = [hist_frame_ids[0]] * pad_count + hist_frame_ids
                 else:
                     # Edge case: frame 0 has no past → fill with dummy (all-zero)
                     hist_boxes = torch.zeros(N_hist, 4, dtype=torch.float32)
+                    hist_frame_ids = [0] * N_hist
 
                 scale = torch.tensor([W, H, W, H], dtype=torch.float32)
                 historical_boxes = (hist_boxes / scale).clamp(0.0, 1.0)     # [N_hist, 4] in [0,1]
+                ego_compensated_prev_boxes = None
+                motion_estimation_stats = None
+
+                if self.motion_delta_type == 'residual':
+                    dataset_name = dataset.get_name()
+                    seq_name = str(dataset.sequence_list[seq_id])
+                    cache = self._affine_caches.get(dataset_name)
+                    if cache is None:
+                        cache = AffineCache(
+                            self.affine_cache_root,
+                            dataset_name=dataset_name,
+                            enabled=self.affine_cache_enable,
+                            fallback=self.affine_cache_fallback)
+                        self._affine_caches[dataset_name] = cache
+                    compensated = []
+                    stats_rows = []
+                    for pair_idx in range(N_hist - 1):
+                        prev_fid = hist_frame_ids[pair_idx]
+                        curr_fid = hist_frame_ids[pair_idx + 1]
+                        prev_box = hist_boxes[pair_idx]
+                        curr_box = hist_boxes[pair_idx + 1]
+                        pair_valid = float(
+                            prev_fid != curr_fid
+                            and prev_box[2] > 0 and prev_box[3] > 0
+                            and curr_box[2] > 0 and curr_box[3] > 0)
+
+                        if pair_valid:
+                            lookup = cache.get_affine(
+                                seq_name, prev_fid, curr_fid)
+                            affine = lookup.affine
+                        else:
+                            affine = np.array([[1.0, 0.0, 0.0],
+                                               [0.0, 1.0, 0.0]], dtype=np.float32)
+                            lookup = None
+
+                        transformed_box = transform_xywh_box(
+                            prev_box.numpy(), affine, image_size=(W, H))
+                        compensated.append(torch.from_numpy(transformed_box))
+                        stats_rows.append(torch.tensor([
+                            pair_valid,
+                            float(lookup.cache_hit) if lookup else 0.0,
+                            float(lookup.fallback_identity) if lookup else 0.0,
+                            float(lookup.valid) if lookup else 0.0,
+                            lookup.inlier_ratio if lookup else 0.0,
+                            lookup.reproj_error if lookup else 0.0,
+                        ], dtype=torch.float32))
+
+                    compensated = torch.stack(compensated, dim=0)
+                    ego_compensated_prev_boxes = (compensated / scale).clamp(0.0, 1.0)
+                    motion_estimation_stats = torch.stack(stats_rows, dim=0)
 
                 data = TensorDict({'template_images': template_frames,
                                    'template_anno': template_anno['bbox'],
@@ -199,6 +266,9 @@ class TrackingSampler(torch.utils.data.Dataset):
                                    'dataset': dataset.get_name(),
                                    'test_class': meta_obj_test.get('object_class_name'),
                                    'historical_boxes': historical_boxes})
+                if ego_compensated_prev_boxes is not None:
+                    data['ego_compensated_prev_boxes'] = ego_compensated_prev_boxes
+                    data['motion_estimation_stats'] = motion_estimation_stats
 
                 # tokenize language
                 if self.multi_modal_language:

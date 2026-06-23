@@ -6,6 +6,8 @@ from lib.utils.box_ops import box_xywh_to_xyxy, box_xyxy_to_cxcywh
 from lib.models.seqtrack import build_seqtrack
 from lib.test.tracker.seqtrack_utils import Preprocessor
 from lib.utils.box_ops import clip_box
+from lib.utils.global_motion import transform_xywh_box
+from lib.train.data.affine_cache import AffineCache
 import numpy as np
 
 
@@ -36,8 +38,23 @@ class SEQTRACK(BaseTracker):
                              and self.cfg.MODEL.MOTION.get('ENABLE', False) \
                              and self.cfg.MODEL.MOTION.get('ENABLE_MOTION_ENCODER', True)
         self.history_length = self.cfg.MODEL.MOTION.get('HISTORY_LENGTH', 5) if self.enable_motion else 0
+        self.motion_delta_type = self.cfg.MODEL.MOTION.get(
+            'MOTION_DELTA_TYPE', 'raw').lower() if self.enable_motion else 'raw'
         self.history_boxes = []  # list of [x,y,w,h] in absolute pixels, oldest first
+        self.compensated_prev_boxes = []  # T_{i-1->i}(b_{i-1}), aligned to history pairs
         self.image_wh = None     # (W, H) of the video frames
+        self.sequence_name = None
+        self.affine_cache = AffineCache(
+            self.cfg.MODEL.MOTION.get('AFFINE_CACHE_ROOT', '') if self.enable_motion else '',
+            dataset_name=dataset_name,
+            enabled=self.enable_motion
+            and self.cfg.MODEL.MOTION.get('AFFINE_CACHE_ENABLE', False),
+            fallback=self.cfg.MODEL.MOTION.get(
+                'AFFINE_CACHE_FALLBACK', 'identity') if self.enable_motion else 'identity')
+        self.motion_stats = {
+            'pairs': 0.0, 'hits': 0.0, 'fallback': 0.0, 'success': 0.0,
+            'inlier_sum': 0.0, 'reprojection_sum': 0.0,
+        }
 
         # online update settings
         DATASET_NAME = dataset_name.upper()
@@ -70,15 +87,24 @@ class SEQTRACK(BaseTracker):
         self.state = info['init_bbox']
         self.frame_id = 0
         self.image_wh = (image.shape[1], image.shape[0])  # (W, H)
+        self.sequence_name = info.get('seq_name', '')
 
         # Initialise motion history with the first ground-truth box
         if self.enable_motion:
-            self.history_boxes = [info['init_bbox']]
+            self.history_boxes = [list(info['init_bbox'])]
+            self.compensated_prev_boxes = []
 
     def track(self, image, info: dict = None):
         H, W, _ = image.shape
         self.frame_id += 1
         self.image_wh = (W, H)
+        current_affine = None
+        current_lookup = None
+        previous_state = list(self.state)
+        if self.enable_motion and self.motion_delta_type == 'residual':
+            current_lookup = self.affine_cache.get_affine(
+                self.sequence_name, self.frame_id - 1, self.frame_id)
+            current_affine = current_lookup.affine
         x_patch_arr, resize_factor = sample_target(image, self.state, self.params.search_factor,
                                                    output_sz=self.params.search_size)  # (x1, y1, w, h)
         search = self.preprocessor.process(x_patch_arr)
@@ -90,6 +116,7 @@ class SEQTRACK(BaseTracker):
 
         # ---- Build historical_boxes for MotionModule ----
         historical_boxes = None
+        ego_compensated_prev_boxes = None
         if self.enable_motion and len(self.history_boxes) > 0:
             # Maintain exactly history_length past boxes (causal: [t-N, ..., t-1])
             # If we have fewer than history_length, pad with the oldest available box
@@ -102,13 +129,23 @@ class SEQTRACK(BaseTracker):
             historical_boxes = (hist_t / scale).clamp(0.0, 1.0)  # [N, 4] in [0,1]
             historical_boxes = historical_boxes.unsqueeze(0)      # [1, N, 4] add batch dim
 
+            if self.motion_delta_type == 'residual':
+                pair_boxes = self.compensated_prev_boxes[-(self.history_length - 1):]
+                pad_count = self.history_length - len(self.history_boxes)
+                pair_boxes = [hist[0]] * pad_count + pair_boxes
+                comp_t = torch.tensor(
+                    pair_boxes, dtype=torch.float32, device=xz[0].device)
+                ego_compensated_prev_boxes = (
+                    comp_t / scale).clamp(0.0, 1.0).unsqueeze(0)
+
         # run the decoder
         with torch.no_grad():
             out_dict = self.network.inference_decoder(xz=xz,
                                                       sequence=self.init_seq,
                                                       window=self.hanning,
                                                       seq_format=self.seq_format,
-                                                      historical_boxes=historical_boxes)
+                                                      historical_boxes=historical_boxes,
+                                                      ego_compensated_prev_boxes=ego_compensated_prev_boxes)
 
         pred_boxes = out_dict['pred_boxes'].view(-1, 4)
 
@@ -126,6 +163,33 @@ class SEQTRACK(BaseTracker):
 
         # ---- Update motion history ----
         if self.enable_motion:
+            if self.motion_delta_type == 'residual':
+                compensated_prev = transform_xywh_box(
+                    previous_state, current_affine, image_size=(W, H)).tolist()
+                self.compensated_prev_boxes.append(compensated_prev)
+                if len(self.compensated_prev_boxes) > self.history_length - 1:
+                    self.compensated_prev_boxes.pop(0)
+
+                self.motion_stats['pairs'] += 1.0
+                self.motion_stats['hits'] += float(current_lookup.cache_hit)
+                self.motion_stats['fallback'] += float(current_lookup.fallback_identity)
+                self.motion_stats['success'] += float(
+                    current_lookup.cache_hit and current_lookup.valid)
+                if current_lookup.cache_hit and current_lookup.valid:
+                    self.motion_stats['inlier_sum'] += current_lookup.inlier_ratio
+                    self.motion_stats['reprojection_sum'] += current_lookup.reproj_error
+                if self.frame_id <= 3 or self.frame_id % 100 == 0:
+                    pair_count = self.motion_stats['pairs']
+                    success_count = self.motion_stats['success']
+                    mean_inlier = self.motion_stats['inlier_sum'] / max(success_count, 1.0)
+                    mean_reproj = self.motion_stats['reprojection_sum'] / max(success_count, 1.0)
+                    print(
+                        f"[E2 affine frame {self.frame_id}] "
+                        f"cache_hit_rate={self.motion_stats['hits'] / pair_count:.4f} "
+                        f"fallback_identity_ratio={self.motion_stats['fallback'] / pair_count:.4f} "
+                        f"success_rate={success_count / pair_count:.4f} "
+                        f"mean_inlier_ratio={mean_inlier:.4f} "
+                        f"mean_reprojection_error={mean_reproj:.4f}")
             self.history_boxes.append(list(self.state))
             if len(self.history_boxes) > self.history_length:
                 self.history_boxes.pop(0)

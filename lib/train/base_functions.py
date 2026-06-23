@@ -1,6 +1,8 @@
 import torch
 from torch.utils.data.distributed import DistributedSampler
 import torch.nn as nn
+import os
+import warnings
 
 # datasets related
 # from lib.train.dataset import Lasot, Got10k, MSCOCOSeq, ImagenetVID, TrackingNet, Imagenet1k
@@ -224,6 +226,26 @@ def build_dataloaders(cfg, settings):
 
     # Train sampler and loader
     sampler_mode = getattr(cfg.DATA, "SAMPLER_MODE", "causal")
+    motion_cfg = getattr(cfg.MODEL, "MOTION", None)
+    motion_enabled = motion_cfg is not None \
+        and motion_cfg.get("ENABLE", False) \
+        and motion_cfg.get("ENABLE_MOTION_ENCODER", True)
+    motion_delta_type = motion_cfg.get("MOTION_DELTA_TYPE", "raw") \
+        if motion_enabled else "raw"
+    history_length = motion_cfg.get("HISTORY_LENGTH", 5) if motion_cfg else 5
+    affine_cache_enable = motion_cfg.get("AFFINE_CACHE_ENABLE", False) if motion_cfg else False
+    affine_cache_root = motion_cfg.get("AFFINE_CACHE_ROOT", "") if motion_cfg else ""
+    affine_cache_fallback = motion_cfg.get("AFFINE_CACHE_FALLBACK", "identity") if motion_cfg else "identity"
+    if motion_delta_type == "residual":
+        if not affine_cache_enable:
+            warnings.warn(
+                "MOTION_DELTA_TYPE=residual but AFFINE_CACHE_ENABLE=false; "
+                "all transforms will fall back to identity.", RuntimeWarning)
+        elif not affine_cache_root or not os.path.isdir(
+                os.path.expanduser(str(affine_cache_root))):
+            warnings.warn(
+                f"Affine cache root does not exist: {affine_cache_root!r}; "
+                "missing sequences will fall back to identity.", RuntimeWarning)
     dataset_train = sampler.TrackingSampler(datasets=names2datasets(cfg.DATA.TRAIN.DATASETS_NAME, settings, opencv_loader),
                                             p_datasets=cfg.DATA.TRAIN.DATASETS_RATIO,
                                             samples_per_epoch=cfg.DATA.TRAIN.SAMPLE_PER_EPOCH,
@@ -231,7 +253,12 @@ def build_dataloaders(cfg, settings):
                                             num_template_frames=settings.num_template, processing=data_processing_train,
                                             frame_sample_mode=sampler_mode, max_query_len=settings.max_query_len,
                                             bert_model=settings.bert_model, bert_path=settings.bert_path,
-                                            multi_modal_language=settings.multi_modal_language
+                                            multi_modal_language=settings.multi_modal_language,
+                                            motion_delta_type=motion_delta_type,
+                                            history_length=history_length,
+                                            affine_cache_enable=affine_cache_enable,
+                                            affine_cache_root=affine_cache_root,
+                                            affine_cache_fallback=affine_cache_fallback
                                             )
 
     train_sampler = DistributedSampler(dataset_train) if settings.local_rank != -1 else None

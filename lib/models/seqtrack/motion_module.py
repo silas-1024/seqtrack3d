@@ -100,12 +100,16 @@ class MotionModule(nn.Module):
                  num_layers: int = 2,
                  num_heads: int = 8,
                  enable_reliability: bool = True,
-                 motion_scale: float = 128.0):
+                 motion_scale: float = 128.0,
+                 motion_delta_type: str = 'raw'):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.history_length = history_length
         self.enable_reliability = enable_reliability
         self.motion_scale = motion_scale
+        self.motion_delta_type = str(motion_delta_type).lower()
+        if self.motion_delta_type not in ('raw', 'residual'):
+            raise ValueError("MOTION_DELTA_TYPE must be 'raw' or 'residual'")
 
         self.reliability_estimator = ReliabilityEstimator(
             input_dim=4, hidden_dim=64
@@ -140,6 +144,7 @@ class MotionModule(nn.Module):
 
     def forward(self,
                 historical_boxes: torch.Tensor,
+                ego_compensated_prev_boxes: torch.Tensor = None,
                 return_aux: bool = False) -> dict:
         """
         Args:
@@ -155,8 +160,24 @@ class MotionModule(nn.Module):
 
         # 1. Boxes → deltas, then scaled up by MOTION_SCALE so that signal is
         #    meaningful (∼0.1–1.0 range instead of 0.001–0.005).
-        deltas = self._boxes_to_deltas(historical_boxes)     # [B, N-1, 4]
-        deltas = deltas * self.motion_scale                  # ← scale fix
+        raw_deltas = self._boxes_to_deltas(historical_boxes)  # [B, N-1, 4]
+        if self.motion_delta_type == 'residual':
+            if ego_compensated_prev_boxes is None:
+                raise ValueError(
+                    "Residual motion requires ego_compensated_prev_boxes [B, N-1, 4]")
+            if ego_compensated_prev_boxes.shape != raw_deltas.shape:
+                raise ValueError(
+                    "ego_compensated_prev_boxes must match delta shape "
+                    f"{tuple(raw_deltas.shape)}, got {tuple(ego_compensated_prev_boxes.shape)}")
+            residual_deltas = historical_boxes[:, 1:, :] - ego_compensated_prev_boxes
+            deltas = residual_deltas
+        else:
+            residual_deltas = raw_deltas
+            deltas = raw_deltas
+
+        raw_deltas = raw_deltas * self.motion_scale
+        residual_deltas = residual_deltas * self.motion_scale
+        deltas = deltas * self.motion_scale
 
         # 2. Reliability estimation
         if self.enable_reliability and self.reliability_estimator is not None:
@@ -178,6 +199,8 @@ class MotionModule(nn.Module):
             out['motion_feature']  = motion_feature
             out['reliability']     = reliability
             out['deltas']          = deltas
+            out['raw_deltas']      = raw_deltas
+            out['residual_deltas'] = residual_deltas
 
         return out
 

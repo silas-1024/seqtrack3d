@@ -36,6 +36,10 @@ cfg.MODEL.MOTION.MOTION_LOSS_WEIGHT = 0.0       # λ for L_motion (0.0 by defaul
 cfg.MODEL.MOTION.ENABLE_RELIABILITY = True      # Ablation: reliability estimator
 cfg.MODEL.MOTION.ENABLE_MOTION_ENCODER = True   # Ablation: enable Motion Encoder / RMP branch
 cfg.MODEL.MOTION.ENABLE_MOTION_GUIDED_ATTN = True  # Ablation: motion bias in cross-attn
+cfg.MODEL.MOTION.MOTION_DELTA_TYPE = "raw"       # raw or affine ego-motion compensated residual
+cfg.MODEL.MOTION.AFFINE_CACHE_ENABLE = False
+cfg.MODEL.MOTION.AFFINE_CACHE_ROOT = ""
+cfg.MODEL.MOTION.AFFINE_CACHE_FALLBACK = "identity"
 
 # TRAIN
 cfg.TRAIN = edict()

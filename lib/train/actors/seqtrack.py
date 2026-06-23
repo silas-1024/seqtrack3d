@@ -21,6 +21,7 @@ class SeqTrackActor(BaseActor):
         # Default to 0.0 — only enable motion aux loss after verifying cross-attention works.
         self.motion_loss_weight = motion_cfg.get('MOTION_LOSS_WEIGHT', 0.0) if motion_cfg else 0.0
         self.history_length = motion_cfg.get('HISTORY_LENGTH', 5) if motion_cfg else 5
+        self.motion_delta_type = motion_cfg.get('MOTION_DELTA_TYPE', 'raw') if motion_cfg else 'raw'
 
         # ---- RMP diagnostic counter ----
         self.iteration = 0
@@ -78,9 +79,11 @@ class SeqTrackActor(BaseActor):
 
         # ---- Extract REAL historical boxes (pre-computed by sampler from video annotation) ----
         historical_boxes = None
+        ego_compensated_prev_boxes = None
         if self.enable_motion and 'historical_boxes' in data:
             # historical_boxes is [B, N, 4] in [x,y,w,h] format, normalized [0,1]
             historical_boxes = data['historical_boxes']
+            ego_compensated_prev_boxes = data.get('ego_compensated_prev_boxes', None)
 
         box = (targets * (bins - 1)).int() # discretize the coordinates
 
@@ -104,8 +107,12 @@ class SeqTrackActor(BaseActor):
         if self.enable_motion:
             outputs, motion_aux = self.net(
                 xz=feature_xz, seq=input_seqs, mode="decoder",
-                historical_boxes=historical_boxes, return_motion_aux=True
+                historical_boxes=historical_boxes,
+                ego_compensated_prev_boxes=ego_compensated_prev_boxes,
+                return_motion_aux=True
             )
+            if 'motion_estimation_stats' in data:
+                motion_aux['motion_estimation_stats'] = data['motion_estimation_stats']
             outputs = outputs[-1].reshape(-1, len_embedding)
             return outputs, target_seqs, motion_aux
         else:
@@ -122,6 +129,7 @@ class SeqTrackActor(BaseActor):
         # Motion auxiliary loss (default weight=0 — enable after verifying cross-attn works)
         motion_loss_val = 0.0
         reliability = motion_bias = motion_feat = deltas = None
+        raw_deltas = residual_deltas = estimation_stats = None
         if self.enable_motion and motion_aux is not None and motion_aux.get('motion_feature') is not None:
             motion_loss = self.net.module.compute_motion_loss(motion_aux) \
                 if hasattr(self.net, 'module') else self.net.compute_motion_loss(motion_aux)
@@ -133,6 +141,9 @@ class SeqTrackActor(BaseActor):
             motion_bias = motion_aux.get('motion_bias')        # [B, D]
             motion_feat = motion_aux.get('motion_feature')     # [B, D]
             deltas      = motion_aux.get('deltas')             # [B, N-1, 4]
+            raw_deltas = motion_aux.get('raw_deltas')
+            residual_deltas = motion_aux.get('residual_deltas')
+            estimation_stats = motion_aux.get('motion_estimation_stats')
 
         outputs = outputs.softmax(-1)
         outputs = outputs[:, :self.BINS]
@@ -167,6 +178,34 @@ class SeqTrackActor(BaseActor):
                     status["Motion/feat_norm"] = motion_feat.norm(dim=-1).mean().item()
                 if deltas is not None:
                     status["Motion/delta_norm"] = deltas.norm(dim=-1).mean().item()
+                if raw_deltas is not None:
+                    status["Motion/raw_delta_mean"] = raw_deltas.mean().item()
+                    status["Motion/raw_delta_var"] = raw_deltas.var(unbiased=False).item()
+                if residual_deltas is not None:
+                    status["Motion/residual_delta_mean"] = residual_deltas.mean().item()
+                    status["Motion/residual_delta_var"] = residual_deltas.var(unbiased=False).item()
+
+                if estimation_stats is not None:
+                    # Columns: pair_valid, cache_hit, fallback, affine_valid,
+                    # inlier_ratio, reprojection_error.
+                    if estimation_stats.ndim == 3 and estimation_stats.shape[-1] == 6:
+                        stats = estimation_stats
+                        if stats.shape[0] == self.history_length - 1:
+                            stats = stats.transpose(0, 1).contiguous()
+                        valid_pairs = stats[..., 0] > 0.5
+                        if valid_pairs.any():
+                            valid_stats = stats[valid_pairs]
+                            status["Motion/affine_cache_hit_rate"] = valid_stats[:, 1].mean().item()
+                            status["Motion/fallback_identity_ratio"] = valid_stats[:, 2].mean().item()
+                            status["Motion/affine_valid_rate"] = valid_stats[:, 3].mean().item()
+                            successful = (valid_stats[:, 1] > 0.5) & (valid_stats[:, 3] > 0.5)
+                            if successful.any():
+                                success_stats = valid_stats[successful]
+                                status["Motion/mean_inlier_ratio"] = success_stats[:, 4].mean().item()
+                                status["Motion/mean_reprojection_error"] = success_stats[:, 5].mean().item()
+                            else:
+                                status["Motion/mean_inlier_ratio"] = 0.0
+                                status["Motion/mean_reprojection_error"] = 0.0
 
                 # ---- RMP diagnostics: print every 10 iters for first 3000 ----
                 if self.iteration <= 3000 and self.iteration % 10 == 1:
@@ -176,7 +215,11 @@ class SeqTrackActor(BaseActor):
                           f"gate_std={gstd_str}  delta_norm={dnorm_str}")
                 # ---- Print raw deltas for first 3 batches (scale verification) ----
                 if self.iteration <= 3 and deltas is not None:
-                    print(f"[RMP DELTA iter {self.iteration}] deltas[0] (scaled, 1st sample):\n{deltas[0]}")
+                    print(f"[RMP DELTA iter {self.iteration}] "
+                          f"type={self.motion_delta_type}, selected deltas[0] (scaled):\n{deltas[0]}")
+                    if self.motion_delta_type == 'residual':
+                        print(f"[RMP RAW DELTA iter {self.iteration}] raw deltas[0] (scaled):\n"
+                              f"{raw_deltas[0]}")
 
                 # ---- RMP guard: gate.std → 0 means V-gating is dead ----
                 GATE_STD_MIN = 0.02       # only panic if truly collapsed

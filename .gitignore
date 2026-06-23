@@ -16,3 +16,4 @@ checkpoints/
 logs/
 failure_analysis_results.json
 analyze_failures.py
+residual_data/

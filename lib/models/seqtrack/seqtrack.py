@@ -58,6 +58,7 @@ class SEQTRACK(nn.Module):
                 num_heads=motion_cfg.get('NUM_HEADS', 8),
                 enable_reliability=motion_cfg.get('ENABLE_RELIABILITY', True),
                 motion_scale=motion_cfg.get('MOTION_SCALE', 128.0),
+                motion_delta_type=motion_cfg.get('MOTION_DELTA_TYPE', 'raw'),
             )
 
         # Different type of visual features for decoder.
@@ -79,7 +80,9 @@ class SEQTRACK(nn.Module):
     # ------------------------------------------------------------------
     # Public helpers for the actor
     # ------------------------------------------------------------------
-    def compute_motion(self, historical_boxes: torch.Tensor, return_aux: bool = False):
+    def compute_motion(self, historical_boxes: torch.Tensor,
+                       ego_compensated_prev_boxes: torch.Tensor = None,
+                       return_aux: bool = False):
         """
         Run the motion pipeline on a stack of historical boxes.
 
@@ -94,7 +97,10 @@ class SEQTRACK(nn.Module):
             if return_aux:
                 dummy['motion_feature'] = None
             return dummy
-        return self.motion_module(historical_boxes, return_aux=return_aux)
+        return self.motion_module(
+            historical_boxes,
+            ego_compensated_prev_boxes=ego_compensated_prev_boxes,
+            return_aux=return_aux)
 
     def compute_motion_loss(self, aux: dict) -> torch.Tensor:
         """Compute auxiliary motion regularisation loss."""
@@ -106,7 +112,8 @@ class SEQTRACK(nn.Module):
     # Core forward
     # ------------------------------------------------------------------
     def forward(self, images_list=None, xz=None, seq=None, mode="encoder",
-                historical_boxes=None, return_motion_aux=False):
+                historical_boxes=None, ego_compensated_prev_boxes=None,
+                return_motion_aux=False):
         """
         image_list: list of template and search images, template images should precede search images
         xz: feature from encoder
@@ -118,7 +125,9 @@ class SEQTRACK(nn.Module):
         if mode == "encoder":
             return self.forward_encoder(images_list)
         elif mode == "decoder":
-            return self.forward_decoder(xz, seq, historical_boxes, return_motion_aux)
+            return self.forward_decoder(
+                xz, seq, historical_boxes, ego_compensated_prev_boxes,
+                return_motion_aux)
         else:
             raise ValueError
 
@@ -127,17 +136,21 @@ class SEQTRACK(nn.Module):
         xz = self.encoder(images_list)
         return xz
 
-    def _get_motion_bias(self, historical_boxes, return_aux):
+    def _get_motion_bias(self, historical_boxes, ego_compensated_prev_boxes, return_aux):
         """Compute motion_bias from historical boxes; returns (motion_bias, aux_dict_or_None)."""
         if not self.enable_motion or not self.enable_motion_guided_attn:
             return None, {}
         if historical_boxes is None:
             return None, {}
-        motion_out = self.compute_motion(historical_boxes, return_aux=return_aux)
+        motion_out = self.compute_motion(
+            historical_boxes,
+            ego_compensated_prev_boxes=ego_compensated_prev_boxes,
+            return_aux=return_aux)
         return motion_out.get('motion_bias', None), motion_out
 
     def forward_decoder(self, xz, sequence,
-                        historical_boxes=None, return_motion_aux=False):
+                        historical_boxes=None, ego_compensated_prev_boxes=None,
+                        return_motion_aux=False):
 
         xz_mem = xz[-1]
         B, _, _ = xz_mem.shape
@@ -163,9 +176,14 @@ class SEQTRACK(nn.Module):
             hb = historical_boxes
             if hb.ndim == 3 and hb.shape[0] != B and hb.shape[1] == B:
                 historical_boxes = hb.transpose(0, 1).contiguous()  # [H,B,4] → [B,H,4]
+        if ego_compensated_prev_boxes is not None:
+            cb = ego_compensated_prev_boxes
+            if cb.ndim == 3 and cb.shape[0] != B and cb.shape[1] == B:
+                ego_compensated_prev_boxes = cb.transpose(0, 1).contiguous()
 
         # Compute motion bias
-        motion_bias, motion_aux = self._get_motion_bias(historical_boxes, return_motion_aux)
+        motion_bias, motion_aux = self._get_motion_bias(
+            historical_boxes, ego_compensated_prev_boxes, return_motion_aux)
 
         out = self.decoder(dec_mem,
                            self.pos_embed.permute(1,0,2).expand(-1,B,-1),
@@ -178,7 +196,7 @@ class SEQTRACK(nn.Module):
         return out
 
     def inference_decoder(self, xz, sequence, window=None, seq_format='xywh',
-                          historical_boxes=None):
+                          historical_boxes=None, ego_compensated_prev_boxes=None):
         # Forward the decoder
         xz_mem = xz[-1]
         B, _, _ = xz_mem.shape
@@ -198,7 +216,8 @@ class SEQTRACK(nn.Module):
         dec_mem = dec_mem.permute(1,0,2)  #[NL,B,D]
 
         # Compute motion bias for inference
-        motion_bias, _ = self._get_motion_bias(historical_boxes, return_aux=False)
+        motion_bias, _ = self._get_motion_bias(
+            historical_boxes, ego_compensated_prev_boxes, return_aux=False)
 
         out = self.decoder.inference(dec_mem,
                                     self.pos_embed.permute(1,0,2).expand(-1,B,-1),

@@ -220,6 +220,9 @@ class SeqTrackProcessing(BaseProcessing):
             joint_search_anno = list(data['search_anno'])
             valid_hist_mask = None
             hist_scale = None
+            valid_comp_mask = None
+            comp_scale = None
+            valid_hist_count = 0
             if 'historical_boxes' in data:
                 hist_boxes = data['historical_boxes']
                 if isinstance(hist_boxes, torch.Tensor) and hist_boxes.numel() > 0:
@@ -231,9 +234,22 @@ class SeqTrackProcessing(BaseProcessing):
                     valid_hist_mask = (hist_boxes[:, 2] > 0) & (hist_boxes[:, 3] > 0)
                     hist_abs = hist_boxes[valid_hist_mask] * hist_scale
                     joint_search_anno.extend(list(hist_abs))
+                    valid_hist_count = int(valid_hist_mask.sum().item())
+
+            if 'ego_compensated_prev_boxes' in data:
+                comp_boxes = data['ego_compensated_prev_boxes']
+                if isinstance(comp_boxes, torch.Tensor) and comp_boxes.numel() > 0:
+                    img_h, img_w = data['search_images'][0].shape[:2]
+                    comp_scale = torch.tensor(
+                        [img_w, img_h, img_w, img_h],
+                        dtype=comp_boxes.dtype,
+                        device=comp_boxes.device)
+                    valid_comp_mask = (comp_boxes[:, 2] > 0) & (comp_boxes[:, 3] > 0)
+                    comp_abs = comp_boxes[valid_comp_mask] * comp_scale
+                    joint_search_anno.extend(list(comp_abs))
 
             # Apply the same joint horizontal flip to search annotations and
-            # valid history boxes. History boxes use top-left normalized xywh.
+            # both history inputs. All boxes use top-left normalized xywh.
             search_images, joint_search_anno, search_masks = self.transform['joint'](
                 image=data['search_images'], bbox=joint_search_anno,
                 mask=data['search_masks'], new_roll=False)
@@ -244,9 +260,18 @@ class SeqTrackProcessing(BaseProcessing):
             if hist_scale is not None and valid_hist_mask.any():
                 hist_boxes = data['historical_boxes'].clone()
                 transformed_hist = torch.stack(
-                    joint_search_anno[search_anno_count:], dim=0) / hist_scale
+                    joint_search_anno[
+                        search_anno_count:search_anno_count + valid_hist_count], dim=0) / hist_scale
                 hist_boxes[valid_hist_mask] = transformed_hist
                 data['historical_boxes'] = hist_boxes
+
+            if comp_scale is not None and valid_comp_mask.any():
+                comp_boxes = data['ego_compensated_prev_boxes'].clone()
+                comp_start = search_anno_count + valid_hist_count
+                transformed_comp = torch.stack(
+                    joint_search_anno[comp_start:], dim=0) / comp_scale
+                comp_boxes[valid_comp_mask] = transformed_comp
+                data['ego_compensated_prev_boxes'] = comp_boxes
 
         s_list = ['template', 'search']
 

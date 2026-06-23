@@ -36,11 +36,19 @@ def run(settings):
             and motion_cfg.get("ENABLE_MOTION_ENCODER", True)
         v_gating_enabled = motion_enabled \
             and motion_cfg.get("ENABLE_MOTION_GUIDED_ATTN", True)
-        print("[E1-raw-RMP-VGate]")
+        delta_type = motion_cfg.get("MOTION_DELTA_TYPE", "raw") if motion_cfg else "raw"
+        experiment_name = "E2-residual-delta-RMP-VGate" \
+            if delta_type == "residual" else "E1-raw-RMP-VGate"
+        print(f"[{experiment_name}]")
         print(f"  motion enabled: {motion_enabled}")
-        print("  motion input: raw_delta (adjacent normalized xywh difference x 128)")
+        print(f"  MOTION_DELTA_TYPE: {delta_type}")
+        print(f"  motion input: {delta_type}_delta (normalized xywh difference x 128)")
         print(f"  decoder V-Gating enabled: {v_gating_enabled}")
-        print("  residual compensation: disabled")
+        print(f"  affine residual compensation: {delta_type == 'residual'}")
+        print(f"  AFFINE_CACHE_ENABLE: {motion_cfg.get('AFFINE_CACHE_ENABLE', False) if motion_cfg else False}")
+        print(f"  AFFINE_CACHE_ROOT: {motion_cfg.get('AFFINE_CACHE_ROOT', '') if motion_cfg else ''}")
+        print(f"  AFFINE_CACHE_FALLBACK: {motion_cfg.get('AFFINE_CACHE_FALLBACK', 'identity') if motion_cfg else 'identity'}")
+        print("  DataLoader online ORB/RANSAC: false")
         print("  coordinate prior: disabled\n")
 
     # update settings based on cfg
