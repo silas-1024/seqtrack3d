@@ -50,7 +50,7 @@ MODEL:
     ENABLE_MOTION_GUIDED_ATTN: True
     MOTION_DELTA_TYPE: residual
     AFFINE_CACHE_ENABLE: true
-    AFFINE_CACHE_ROOT: /data/affine_cache
+    AFFINE_CACHE_ROOT: ./residual_data/affine_cache
     AFFINE_CACHE_FALLBACK: identity
 TRAIN:
   ENCODER_MULTIPLIER: 0.1
