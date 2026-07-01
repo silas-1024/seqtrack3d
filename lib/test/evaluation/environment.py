@@ -83,7 +83,7 @@ class EnvSettings_ITP:
         self.otblang_path = os.path.join(data_dir, 'otb_lang')
         self.lasotlang_path = os.path.join(data_dir, 'lasot')
 
-        self.satsot_path = os.path.join(data_dir, 'satsot')
+        self.satsot_path = os.path.join(data_dir, 'SatSOT')
         self.viso_path = os.path.join(data_dir, 'viso')
         self.sv248s_test_path = os.path.join(data_dir, 'sv248/test_sv')
 

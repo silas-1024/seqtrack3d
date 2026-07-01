@@ -32,6 +32,13 @@ def parameters(yaml_name: str):
     print(f"  decoder V-Gating enabled: {v_gating_enabled}")
     print(f"  affine residual compensation: {delta_type == 'residual'}")
     print("  coordinate prior: disabled")
+    use_krsu = bool(getattr(cfg.TEST, "USE_KRSU", False))
+    print(f"  E6a-KRSU enabled: {use_krsu}")
+    if use_krsu:
+        print(f"  KRSU_MODE: {getattr(cfg.TEST, 'KRSU_MODE', 'kalman_lite')}")
+        print(f"  KRSU_CENTER_ONLY: {getattr(cfg.TEST, 'KRSU_CENTER_ONLY', True)}")
+        print("  KRSU P covariance: maintained across frames")
+        print("  KRSU coordinate system: absolute image pixels")
 
     params.yaml_name = yaml_name
     # template and search region
@@ -41,8 +48,9 @@ def parameters(yaml_name: str):
     params.search_size = cfg.TEST.SEARCH_SIZE
 
     # Network checkpoint path
+    checkpoint_yaml_name = getattr(cfg.TEST, "CHECKPOINT_YAML_NAME", "") or yaml_name
     params.checkpoint = os.path.join("./checkpoints/train/seqtrack/%s/SEQTRACK_ep%04d.pth.tar" %
-                                     (yaml_name, cfg.TEST.EPOCH))
+                                     (checkpoint_yaml_name, cfg.TEST.EPOCH))
 
     # whether to save boxes from all queries
     params.save_all_boxes = False

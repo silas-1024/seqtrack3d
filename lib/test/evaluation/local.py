@@ -21,7 +21,7 @@ def local_env_settings():
     settings.prj_dir = '/media/lisuran/seqtrack3d'
     settings.result_plot_path = '/media/lisuran/seqtrack3d/output/test/result_plots'
     settings.results_path = '/media/lisuran/seqtrack3d/output/test/tracking_results'    # Where to store tracking results
-    settings.satsot_path = '/media/pc-4090/9bd4d9e0-148f-4dd1-a9c6-1f4c9dff8e4e/datasets/satsot'
+    settings.satsot_path = '/media/pc-4090/9bd4d9e0-148f-4dd1-a9c6-1f4c9dff8e4e/datasets/SatSOT'
     settings.save_dir = '/media/lisuran/seqtrack3d/output'
     settings.segmentation_path = '/media/lisuran/seqtrack3d/output/test/segmentation_results'
     settings.sv248s_test_path = '/media/pc-4090/9bd4d9e0-148f-4dd1-a9c6-1f4c9dff8e4e/datasets/sv248/test_sv'
