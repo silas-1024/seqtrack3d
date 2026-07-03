@@ -1,4 +1,6 @@
-# E6a-KRSU-lite: E2 residual RMP + inference-only Kalman-style residual state update
+# Ablation: RSC decoder with KRSU but without decoder V-gating.
+# Loads the E2 residual RMP checkpoint, disables decoder value gating,
+# then applies inference-only KRSU-lite as the residual state update.
 DATA:
   MAX_SAMPLE_INTERVAL: 400
   MEAN:
@@ -47,7 +49,7 @@ MODEL:
     MOTION_LOSS_WEIGHT: 0.0
     ENABLE_RELIABILITY: True
     ENABLE_MOTION_ENCODER: True
-    ENABLE_MOTION_GUIDED_ATTN: True
+    ENABLE_MOTION_GUIDED_ATTN: False
     MOTION_DELTA_TYPE: residual
     AFFINE_CACHE_ENABLE: true
     AFFINE_CACHE_ROOT: ./residual_data/affine_cache

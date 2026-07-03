@@ -1,4 +1,6 @@
-# E6a-KRSU-lite: E2 residual RMP + inference-only Kalman-style residual state update
+# Ablation: RSC decoder without decoder V-gating.
+# Loads the E2 residual RMP checkpoint, keeps the residual motion module present,
+# but disables motion-guided decoder value gating.
 DATA:
   MAX_SAMPLE_INTERVAL: 400
   MEAN:
@@ -47,7 +49,7 @@ MODEL:
     MOTION_LOSS_WEIGHT: 0.0
     ENABLE_RELIABILITY: True
     ENABLE_MOTION_ENCODER: True
-    ENABLE_MOTION_GUIDED_ATTN: True
+    ENABLE_MOTION_GUIDED_ATTN: False
     MOTION_DELTA_TYPE: residual
     AFFINE_CACHE_ENABLE: true
     AFFINE_CACHE_ROOT: ./residual_data/affine_cache
@@ -76,22 +78,7 @@ TEST:
   TEMPLATE_SIZE: 256
   WINDOW: true
   NUM_TEMPLATES: 2
-  USE_KRSU: true
-  KRSU_MODE: kalman_lite
-  KRSU_CENTER_ONLY: true
-  KRSU_USE_LOGIT_CONF: true
-  KRSU_USE_AFFINE_VALID: true
-  KRSU_Q_SCALE: 1.0
-  KRSU_R_SCALE: 225.0
-  KRSU_BOOTSTRAP_Q: 400.0
-  KRSU_TARGET_Q_FLOOR_SCALE: 0.5
-  KRSU_MIN_HISTORY_FOR_PRIOR: 2
-  KRSU_AFFINE_INVALID_Q_PENALTY: 4.0
-  KRSU_MAX_UPDATE_PIXELS: 20
-  KRSU_DYNAMIC_CLIP: true
-  KRSU_MIN_R: 1.0e-4
-  KRSU_MIN_Q: 1.0e-4
-  KRSU_MIN_P: 1.0e-4
+  USE_KRSU: false
   UPDATE_INTERVALS:
     SV248S_TEST: 20
     SATSOT: 20
